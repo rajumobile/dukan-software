@@ -55,14 +55,28 @@ def init_db():
             shop_phone TEXT DEFAULT '8349596263',
             shop_gstin TEXT DEFAULT '',
             upi_id TEXT DEFAULT '8349596263@upi',
+            lock_operator_price INTEGER DEFAULT 1,
             banner_image TEXT DEFAULT ''
         )
     """)
 
+    # पुराने डेटाबेस में नए कॉलम्स ऑटो-अपग्रेड (INSERT से पहले जोड़ना जरूरी है)
+    def add_col(tbl, col, typ):
+        try:
+            c.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {typ}")
+        except sqlite3.OperationalError:
+            pass
+
+    add_col("shop_settings", "lock_operator_price", "INTEGER DEFAULT 1")
+    add_col("shop_settings", "shop_gstin", "TEXT DEFAULT ''")
+    add_col("shop_settings", "upi_id", "TEXT DEFAULT '8349596263@upi'")
+    add_col("shop_settings", "shop_phone", "TEXT DEFAULT '8349596263'")
+
+    c.execute("INSERT OR IGNORE INTO shop_settings (id, shop_title, shop_subtitle, shop_phone, shop_gstin, upi_id, lock_operator_price, banner_image) VALUES (1, 'Raju Bhaiya Online Store', 'डिजिटल प्रोडक्ट कैटलॉग एवं ऑनलाइन ऑर्डर', '8349596263', '', '8349596263@upi', 1, '')")
+
     c.execute("""
         CREATE TABLE IF NOT EXISTS products (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            serial_no TEXT DEFAULT '',
             name TEXT NOT NULL,
             category TEXT DEFAULT 'General',
             hsn_code TEXT DEFAULT '8504',
@@ -74,6 +88,16 @@ def init_db():
             description TEXT DEFAULT '',
             image_url TEXT DEFAULT '',
             is_online INTEGER DEFAULT 1
+        )
+    """)
+    
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS item_units (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER,
+            serial_no TEXT UNIQUE,
+            status TEXT DEFAULT 'IN_STOCK',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     
@@ -128,25 +152,17 @@ def init_db():
         )
     """)
 
-    # 2. पुराने डेटाबेस में नए कॉलम ऑटो-अपग्रेड (INSERT से पहले)
-    def add_col(tbl, col, typ):
-        try:
-            c.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {typ}")
-        except sqlite3.OperationalError:
-            pass
-
-    add_col("shop_settings", "shop_phone", "TEXT DEFAULT '8349596263'")
-    add_col("shop_settings", "shop_gstin", "TEXT DEFAULT ''")
-    add_col("shop_settings", "upi_id", "TEXT DEFAULT '8349596263@upi'")
-    add_col("products", "serial_no", "TEXT DEFAULT ''")
     add_col("products", "hsn_code", "TEXT DEFAULT '8504'")
+    add_col("sales", "serial_no", "TEXT DEFAULT ''")
+    add_col("users", "phone", "TEXT DEFAULT ''")
+    add_col("users", "commission_percent", "REAL DEFAULT 0")
+    add_col("users", "permissions", "TEXT DEFAULT '[]'")
+    add_col("sales", "operator_commission", "REAL DEFAULT 0")
     add_col("products", "gst_percent", "REAL DEFAULT 0")
     add_col("products", "category", "TEXT DEFAULT 'General'")
     add_col("products", "description", "TEXT DEFAULT ''")
     add_col("products", "image_url", "TEXT DEFAULT ''")
     add_col("products", "is_online", "INTEGER DEFAULT 1")
-    add_col("sales", "serial_no", "TEXT DEFAULT ''")
-    add_col("sales", "operator_commission", "REAL DEFAULT 0")
     add_col("sales", "gst_percent", "REAL DEFAULT 0")
     add_col("sales", "gst_amount", "REAL DEFAULT 0")
     add_col("sales", "bill_no", "TEXT")
@@ -155,12 +171,6 @@ def init_db():
     add_col("sales", "customer_phone", "TEXT")
     add_col("sales", "payment_mode", "TEXT")
     add_col("sales", "due_date", "TEXT")
-    add_col("users", "phone", "TEXT DEFAULT ''")
-    add_col("users", "commission_percent", "REAL DEFAULT 0")
-    add_col("users", "permissions", "TEXT DEFAULT '[]'")
-
-    # 3. डिफ़ॉल्ट डेटा दर्ज करना
-    c.execute("INSERT OR IGNORE INTO shop_settings (id, shop_title, shop_subtitle, shop_phone, shop_gstin, upi_id, banner_image) VALUES (1, 'Raju Bhaiya Online Store', 'डिजिटल प्रोडक्ट कैटलॉग एवं ऑनलाइन ऑर्डर', '8349596263', '', '8349596263@upi', '')")
 
     admin_perms = json.dumps(ALL_PERMISSIONS)
     default_op_perms = json.dumps(["🛍️ ऑनलाइन स्टोर देखें", "⚡ सुपरफास्ट POS बिलिंग", "📦 स्टॉक व ऑनलाइन शो", "📒 उधारी/खाता अलर्ट"])
@@ -191,8 +201,6 @@ if "generated_otp" not in st.session_state:
     st.session_state.generated_otp = None
 if "reset_target_user" not in st.session_state:
     st.session_state.reset_target_user = None
-if "gen_serial_code" not in st.session_state:
-    st.session_state.gen_serial_code = f"SN-{random.randint(100000, 999999)}"
 
 # --- साइडबार नेविगेशन ---
 st.sidebar.markdown("## 🏢 व्यापार ERP पोर्टल")
@@ -233,7 +241,7 @@ if mode in ["🛍️ ऑनलाइन स्टोर (Customer View)", "🛍�
     shop_phone = settings[2] if settings and settings[2] else "8349596263"
     banner_img = settings[3] if settings else ""
     
-    online_prods = pd.read_sql_query("SELECT id, serial_no, name, category, sell_price, gst_percent, stock, description, image_url FROM products WHERE is_online=1 AND stock > 0", conn)
+    online_prods = pd.read_sql_query("SELECT id, name, category, sell_price, gst_percent, stock, description, image_url FROM products WHERE is_online=1 AND stock > 0", conn)
     conn.close()
 
     h_col1, h_col2 = st.columns([1, 4])
@@ -250,7 +258,7 @@ if mode in ["🛍️ ऑनलाइन स्टोर (Customer View)", "🛍�
     st.divider()
 
     col_s1, col_s2 = st.columns([3, 1])
-    search_query = col_s1.text_input("🔍 सामान या सीरियल नंबर खोजें", placeholder="सामान का नाम या सीरियल नंबर लिखें...")
+    search_query = col_s1.text_input("🔍 सामान खोजें", placeholder="सामान का नाम लिखें...")
     
     categories = ["सभी (All)"] + (online_prods["category"].dropna().unique().tolist() if not online_prods.empty else [])
     selected_cat = col_s2.selectbox("कैटेगरी फ़िल्टर", categories)
@@ -258,10 +266,7 @@ if mode in ["🛍️ ऑनलाइन स्टोर (Customer View)", "🛍�
     filtered_prods = online_prods.copy()
     if not filtered_prods.empty:
         if search_query.strip():
-            filtered_prods = filtered_prods[
-                filtered_prods["name"].str.contains(search_query, case=False, na=False) |
-                filtered_prods["serial_no"].str.contains(search_query, case=False, na=False)
-            ]
+            filtered_prods = filtered_prods[filtered_prods["name"].str.contains(search_query, case=False, na=False)]
         if selected_cat != "सभी (All)":
             filtered_prods = filtered_prods[filtered_prods["category"] == selected_cat]
 
@@ -278,8 +283,6 @@ if mode in ["🛍️ ऑनलाइन स्टोर (Customer View)", "🛍�
                         st.markdown("📦 **[फोटो उपलब्ध नहीं]**")
                     
                     st.subheader(row["name"])
-                    if row["serial_no"]:
-                        st.caption(f"🔢 S/N: `{row['serial_no']}`")
                     st.markdown(f"**कीमत:** <span style='font-size:18px; color:green;'>₹{row['sell_price']:.2f}</span> <small>(GST {row['gst_percent']}%)</small>", unsafe_allow_html=True)
                     if row["description"]:
                         st.caption(row["description"])
@@ -430,21 +433,22 @@ elif mode == "🔐 स्टाफ लॉगिन":
                         st.rerun()
 
 # ==========================================
-# 3. सुपरफास्ट POS बारकोड बिलिंग व डायनामिक UPI QR
+# 3. सुपरफास्ट POS बारकोड बिलिंग (घाटा अलर्ट व फिक्स रेट लॉक सहित)
 # ==========================================
 elif mode in ["⚡ सुपरफास्ट POS बिलिंग", "💰 मल्टी-आइटम बिलिंग"]:
     st.subheader("⚡ सुपरफास्ट POS बारकोड बिलिंग काउंटर")
     
     conn = sqlite3.connect(DB_NAME)
-    prods = pd.read_sql_query("SELECT id, serial_no, name, sell_price, gst_percent, stock, buy_price FROM products WHERE stock > 0", conn)
+    prods = pd.read_sql_query("SELECT id, name, sell_price, gst_percent, stock, buy_price FROM products WHERE stock > 0", conn)
     
     c_set = conn.cursor()
-    c_set.execute("SELECT shop_title, shop_phone, upi_id, shop_gstin FROM shop_settings WHERE id=1")
+    c_set.execute("SELECT shop_title, shop_phone, upi_id, shop_gstin, lock_operator_price FROM shop_settings WHERE id=1")
     s_info = c_set.fetchone()
     current_shop_name = s_info[0] if s_info else "Raju Bhaiya Store"
     current_shop_phone = s_info[1] if s_info and s_info[1] else "8349596263"
     current_upi_id = s_info[2] if s_info and s_info[2] else "8349596263@upi"
     current_gstin = s_info[3] if s_info and s_info[3] else ""
+    is_price_locked = bool(s_info[4]) if s_info and s_info[4] is not None else True
 
     c_comm = conn.cursor()
     c_comm.execute("SELECT commission_percent FROM users WHERE username=?", (st.session_state.username,))
@@ -458,63 +462,59 @@ elif mode in ["⚡ सुपरफास्ट POS बिलिंग", "💰 �
 
     st.markdown("---")
     
-    st.markdown("#### ⚡ 1. बारकोड स्कैनर से तुरंत जोड़ें (Instant Barcode Scan)")
+    st.markdown("#### ⚡ 1. बारकोड स्कैनर से तुरंत जोड़ें (Scan Barcode & Enter)")
     with st.form("barcode_scan_form", clear_on_submit=True):
         sc_col1, sc_col2 = st.columns([3, 1])
-        scanned_code = sc_col1.text_input("⚡ बारकोड / S/N स्कैन करें (Scan Barcode & Enter)", placeholder="बारकोड स्कैनर बीप करें या टाइप करें...")
+        scanned_code = sc_col1.text_input("⚡ बारकोड / सीरियल नंबर स्कैन करें:", placeholder="बारकोड स्कैनर बीप करें या टाइप करें...")
         scan_submit = sc_col2.form_submit_button("⚡ स्कैन कर बिल में जोड़ें", use_container_width=True)
 
         if scan_submit and scanned_code.strip():
-            matched_item = prods[prods["serial_no"].str.lower() == scanned_code.strip().lower()]
-            if not matched_item.empty:
-                item_data = matched_item.iloc[0]
-                already_in_cart = sum(item["qty"] for item in st.session_state.billing_cart if item["id"] == int(item_data["id"]))
-                avail_stock = int(item_data["stock"]) - already_in_cart
+            conn = sqlite3.connect(DB_NAME)
+            c = conn.cursor()
+            c.execute("""
+                SELECT u.id, u.product_id, u.serial_no, p.name, p.sell_price, p.buy_price, p.gst_percent, p.stock
+                FROM item_units u
+                JOIN products p ON u.product_id = p.id
+                WHERE u.serial_no = ? AND u.status = 'IN_STOCK'
+            """, (scanned_code.strip(),))
+            matched_unit = c.fetchone()
+            conn.close()
 
-                if avail_stock >= 1:
-                    base_rate = float(item_data["sell_price"])
-                    gst_p = float(item_data["gst_percent"])
-                    gst_amt = (base_rate * gst_p) / 100.0
-                    net_item_profit = base_rate - float(item_data["buy_price"])
+            if matched_unit:
+                unit_id, p_id, s_no, p_name, s_price, b_price, gst_p, p_stock = matched_unit
+                already_scanned_serials = [it["serial_no"] for it in st.session_state.billing_cart]
+                
+                if s_no in already_scanned_serials:
+                    st.warning(f"⚠️ यह पीस (S/N: {s_no}) पहले से बिल में जुड़ा हुआ है!")
+                else:
+                    base_rate = float(s_price)
+                    gst_amt = (base_rate * float(gst_p)) / 100.0
+                    net_item_profit = base_rate - float(b_price)
                     calc_commission = (net_item_profit * op_comm_rate) / 100.0 if net_item_profit > 0 else 0.0
 
-                    found = False
-                    for it in st.session_state.billing_cart:
-                        if it["id"] == int(item_data["id"]):
-                            it["qty"] += 1
-                            it["total"] = (it["rate"] + (it["rate"] * it["gst_percent"] / 100.0)) * it["qty"]
-                            it["gst_amount"] = (it["rate"] * it["qty"] * it["gst_percent"]) / 100.0
-                            it["profit"] = (it["rate"] - it["buy_price"]) * it["qty"]
-                            it["commission"] = (it["profit"] * op_comm_rate) / 100.0 if it["profit"] > 0 else 0.0
-                            found = True
-                            break
-                    
-                    if not found:
-                        st.session_state.billing_cart.append({
-                            "id": int(item_data["id"]),
-                            "serial_no": str(item_data["serial_no"]),
-                            "name": str(item_data["name"]),
-                            "qty": 1,
-                            "rate": base_rate,
-                            "buy_price": float(item_data["buy_price"]),
-                            "gst_percent": gst_p,
-                            "gst_amount": gst_amt,
-                            "total": base_rate + gst_amt,
-                            "profit": net_item_profit,
-                            "commission": calc_commission
-                        })
-                    st.success(f"⚡ '{item_data['name']}' बिल में जुड़ गया!")
+                    st.session_state.billing_cart.append({
+                        "unit_id": int(unit_id),
+                        "id": int(p_id),
+                        "serial_no": str(s_no),
+                        "name": str(p_name),
+                        "qty": 1,
+                        "rate": base_rate,
+                        "buy_price": float(b_price),
+                        "gst_percent": float(gst_p),
+                        "gst_amount": float(gst_amt),
+                        "total": base_rate + gst_amt,
+                        "profit": net_item_profit,
+                        "commission": calc_commission
+                    })
+                    st.success(f"⚡ '{p_name}' (S/N: {s_no}) बिल में जुड़ गया!")
                     st.rerun()
-                else:
-                    st.error("⚠️ इस सामान का स्टॉक समाप्त हो चुका है!")
             else:
-                st.error(f"❌ '{scanned_code}' बारकोड/सीरियल नंबर से कोई सामान नहीं मिला!")
+                st.error(f"❌ '{scanned_code}' सीरियल नंबर उपलब्ध नहीं है या पहले ही बिक चुका है!")
 
     st.markdown("#### 🛒 2. या मेन्यू से सामान चुनें (Manual Select)")
     if not prods.empty:
-        prods["display_label"] = prods.apply(lambda r: f"{r['name']} (S/N: {r['serial_no']})" if r['serial_no'] else r['name'], axis=1)
-        selected_display = st.selectbox("सामान चुनें", prods["display_label"].tolist())
-        item_data = prods[prods["display_label"] == selected_display].iloc[0]
+        selected_prod = st.selectbox("सामान चुनें", prods["name"].tolist())
+        item_data = prods[prods["name"] == selected_prod].iloc[0]
 
         already_in_cart = sum(item["qty"] for item in st.session_state.billing_cart if item["id"] == int(item_data["id"]))
         avail_stock = int(item_data["stock"]) - already_in_cart
@@ -522,36 +522,57 @@ elif mode in ["⚡ सुपरफास्ट POS बिलिंग", "💰 �
         col1, col2, col3, col4 = st.columns([1, 2, 1, 2])
         max_allowed = max(1, avail_stock)
         qty = col1.number_input("मात्रा", min_value=1, max_value=max_allowed, value=1, disabled=(avail_stock <= 0))
-        rate = col2.number_input("बिक्री दर (₹)", min_value=0.0, value=float(item_data["sell_price"]))
+        
+        # ऑपरेटर के लिए लॉक स्थिति चेक
+        rate_disabled = is_price_locked and (st.session_state.role != "admin")
+        rate = col2.number_input("बिक्री दर (₹)", min_value=0.0, value=float(item_data["sell_price"]), disabled=rate_disabled)
         gst_p = col3.number_input("GST %", min_value=0.0, value=float(item_data["gst_percent"]), step=1.0)
         
+        # ⚠️ घाटा (Loss) और कम दर अलर्ट नोटिफिकेशन
+        fixed_price = float(item_data["sell_price"])
+        cost_price = float(item_data["buy_price"])
+        
+        if rate < cost_price:
+            per_piece_loss = cost_price - rate
+            st.error(f"🚨 **चेतावनी (Loss Alert):** यह सामान खरीद मूल्य (₹{cost_price:.2f}) से कम पर बेचा जा रहा है! आपको प्रति पीस **₹{per_piece_loss:.2f} का घाटा (नुकसान)** होगा!")
+        elif rate < fixed_price:
+            reduced_margin = fixed_price - rate
+            st.warning(f"⚠️ **ध्यान दें:** निर्धारित मूल्य ₹{fixed_price:.2f} से ₹{reduced_margin:.2f} कम दर पर बेचा जा रहा है!")
+
         with col4:
             st.write(f"दुकान में शेष: **{max(0, avail_stock)}** पीस")
             if st.button("➕ लिस्ट में जोड़ें", use_container_width=True, disabled=(avail_stock <= 0)):
                 if avail_stock < qty:
                     st.error("स्टॉक पर्याप्त नहीं है!")
-                elif rate < float(item_data["buy_price"]) and st.session_state.role != "admin":
-                    st.error("⚠️ खरीद मूल्य से कम पर बेचने के लिए एडमिन अनुमति चाहिए!")
+                elif rate < cost_price and st.session_state.role != "admin":
+                    st.error("❌ ऑपरेटर को घाटे में सामान बेचने की अनुमति नहीं है!")
                 else:
-                    base_total = rate * qty
-                    gst_amt = (base_total * gst_p) / 100.0
-                    final_item_total = base_total + gst_amt
-                    net_item_profit = (rate - item_data["buy_price"]) * qty
-                    calc_commission = (net_item_profit * op_comm_rate) / 100.0 if net_item_profit > 0 else 0.0
+                    conn = sqlite3.connect(DB_NAME)
+                    c = conn.cursor()
+                    c.execute("SELECT id, serial_no FROM item_units WHERE product_id = ? AND status = 'IN_STOCK' LIMIT ?", (int(item_data["id"]), int(qty)))
+                    available_units = c.fetchall()
+                    conn.close()
 
-                    st.session_state.billing_cart.append({
-                        "id": int(item_data["id"]),
-                        "serial_no": str(item_data["serial_no"]) if item_data["serial_no"] else "",
-                        "name": str(item_data["name"]),
-                        "qty": int(qty),
-                        "rate": float(rate),
-                        "buy_price": float(item_data["buy_price"]),
-                        "gst_percent": float(gst_p),
-                        "gst_amount": float(gst_amt),
-                        "total": float(final_item_total),
-                        "profit": float(net_item_profit),
-                        "commission": float(calc_commission)
-                    })
+                    for u_row in available_units:
+                        base_total = rate
+                        gst_amt = (base_total * gst_p) / 100.0
+                        net_item_profit = rate - cost_price
+                        calc_commission = (net_item_profit * op_comm_rate) / 100.0 if net_item_profit > 0 else 0.0
+
+                        st.session_state.billing_cart.append({
+                            "unit_id": int(u_row[0]),
+                            "id": int(item_data["id"]),
+                            "serial_no": str(u_row[1]),
+                            "name": str(item_data["name"]),
+                            "qty": 1,
+                            "rate": float(rate),
+                            "buy_price": cost_price,
+                            "gst_percent": float(gst_p),
+                            "gst_amount": float(gst_amt),
+                            "total": float(base_total + gst_amt),
+                            "profit": float(net_item_profit),
+                            "commission": float(calc_commission)
+                        })
                     st.rerun()
     else:
         st.warning("दुकान में कोई सामान स्टॉक में नहीं है!")
@@ -593,11 +614,17 @@ elif mode in ["⚡ सुपरफास्ट POS बिलिंग", "💰 �
                     cursor = conn.cursor()
 
                     for item in st.session_state.billing_cart:
-                        cursor.execute("UPDATE products SET stock = stock - ? WHERE id = ?", (int(item["qty"]), int(item["id"])))
+                        if item.get("unit_id"):
+                            cursor.execute("UPDATE item_units SET status = 'SOLD' WHERE id = ?", (int(item["unit_id"]),))
+                        elif item.get("serial_no"):
+                            cursor.execute("UPDATE item_units SET status = 'SOLD' WHERE serial_no = ?", (str(item["serial_no"]),))
+                        
+                        cursor.execute("UPDATE products SET stock = stock - 1 WHERE id = ?", (int(item["id"]),))
+                        
                         cursor.execute("""
                             INSERT INTO sales (bill_no, product_id, serial_no, product_name, quantity, sell_price, gst_percent, gst_amount, total_amount, profit, operator_commission, sold_by, customer_name, customer_phone, payment_mode, due_date)
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (bill_no, int(item["id"]), str(item.get("serial_no", "")), item["name"], int(item["qty"]), float(item["rate"]), float(item["gst_percent"]), float(item["gst_amount"]), float(item["total"]), float(item["profit"]), float(item.get("commission", 0.0)), str(st.session_state.username), str(cust_name), str(cust_phone), str(payment_mode), str(due_date_val) if due_date_val else ""))
+                        """, (bill_no, int(item["id"]), str(item.get("serial_no", "")), item["name"], 1, float(item["rate"]), float(item["gst_percent"]), float(item["gst_amount"]), float(item["total"]), float(item["profit"]), float(item.get("commission", 0.0)), str(st.session_state.username), str(cust_name), str(cust_phone), str(payment_mode), str(due_date_val) if due_date_val else ""))
 
                     if payment_mode == "उधारी (Credit / Udhar)":
                         cursor.execute("""
@@ -676,31 +703,11 @@ elif mode in ["⚡ सुपरफास्ट POS बिलिंग", "💰 �
         """
         st.components.v1.html(bill_html, height=520)
 
-        print_script = f"""
-        <html><body>
-        <button onclick="printBill()" style="background-color:#2ed573; color:white; padding:10px 20px; font-size:15px; font-weight:bold; border:none; border-radius:5px; cursor:pointer; width:100%;">🖨️ यह GST बिल प्रिंट करें (Print / Save PDF)</button>
-        <script>
-        function printBill() {{
-            var win = window.open('', '', 'height=650,width=450');
-            win.document.write('<html><head><title>Print GST Bill</title></head><body style="margin:20px;">');
-            win.document.write(`{bill_html}`);
-            win.document.write('</body></html>');
-            win.document.close();
-            win.focus();
-            setTimeout(function() {{ win.print(); win.close(); }}, 400);
-        }}
-        </script>
-        </body></html>
-        """
-        st.components.v1.html(print_script, height=60)
-
 # ==========================================
-# 4. सेल्स रिटर्न व रिफंड मैनेजमेंट (New Feature)
+# 4. सेल्स रिटर्न व रिफंड मैनेजमेंट
 # ==========================================
 elif mode == "🔄 सेल्स रिटर्न व रिफंड":
     st.subheader("🔄 सेल्स रिटर्न, रिप्लेसमेंट एवं रिफंड काउंटर")
-    st.caption("पुराने बिल नंबर से सामान वापस लें और स्टॉक को ऑटोमैटिक दुरुस्त करें")
-
     conn = sqlite3.connect(DB_NAME)
     ret_bill_no = st.text_input("🔍 बिल नंबर दर्ज करें (उदा. BILL-20260825...):")
 
@@ -708,894 +715,66 @@ elif mode == "🔄 सेल्स रिटर्न व रिफंड":
         bill_sales = pd.read_sql_query("SELECT id, bill_no, product_id, product_name, serial_no, quantity, sell_price, gst_percent, total_amount, sold_by, customer_name, sale_date FROM sales WHERE bill_no = ?", conn, params=(ret_bill_no.strip(),))
         
         if not bill_sales.empty:
-            st.success(f"✅ बिल मिला: ग्राहक '{bill_sales.iloc[0]['customer_name']}' | तारीख: {bill_sales.iloc[0]['sale_date']}")
-            st.dataframe(bill_sales[["product_name", "serial_no", "quantity", "sell_price", "gst_percent", "total_amount"]].rename(columns={
-                'product_name': 'सामान', 'serial_no': 'सीरियल नं', 'quantity': 'बेची गई मात्रा', 'sell_price': 'दर', 'gst_percent': 'GST %', 'total_amount': 'कुल राशि'
-            }), use_container_width=True)
+            st.success(f"✅ बिल मिला: ग्राहक '{bill_sales.iloc[0]['customer_name']}'")
+            st.dataframe(bill_sales[["product_name", "serial_no", "sell_price", "gst_percent", "total_amount"]], use_container_width=True)
 
             with st.form("process_return_form"):
-                st.markdown("#### 📦 कौन सा सामान वापस लेना है?")
-                selected_item_name = st.selectbox("सामान चुनें:", bill_sales["product_name"].tolist())
+                selected_item_name = st.selectbox("वापस लेने वाला सामान चुनें:", bill_sales["product_name"].tolist())
                 sel_row = bill_sales[bill_sales["product_name"] == selected_item_name].iloc[0]
+                reason = st.text_input("वापसी का कारण (Reason):", placeholder="उदा. डिफेक्टिव पीस")
 
-                c_r1, c_r2 = st.columns(2)
-                ret_qty = c_r1.number_input("वापसी मात्रा (Qty):", min_value=1, max_value=int(sel_row["quantity"]), value=1)
-                unit_price_with_tax = float(sel_row["total_amount"]) / int(sel_row["quantity"])
-                calc_refund = unit_price_with_tax * ret_qty
-                c_r2.metric("रिफंड बनने वाली राशि", f"₹{calc_refund:.2f}")
-
-                reason = st.text_input("वापसी का कारण (Reason):", placeholder="उदा. डिफेक्टिव पीस / ग्राहक ने दूसरा मॉडल लिया")
-
-                if st.form_submit_button("🔄 रिटर्न स्वीकार करें और स्टॉक में वापस जोड़ें", type="primary", use_container_width=True):
+                if st.form_submit_button("🔄 रिटर्न स्वीकार करें", type="primary", use_container_width=True):
                     c = conn.cursor()
-                    # 1. स्टॉक वापस बढ़ाएं
-                    c.execute("UPDATE products SET stock = stock + ? WHERE id = ?", (int(ret_qty), int(sel_row["product_id"])))
-                    # 2. रिटर्न हिस्ट्री में दर्ज करें
+                    c.execute("UPDATE products SET stock = stock + 1 WHERE id = ?", (int(sel_row["product_id"]),))
+                    if sel_row["serial_no"]:
+                        c.execute("UPDATE item_units SET status = 'IN_STOCK' WHERE serial_no = ?", (str(sel_row["serial_no"]),))
+                    
                     c.execute("""
                         INSERT INTO sales_returns (bill_no, product_id, product_name, returned_qty, refund_amount, return_reason, returned_by)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """, (ret_bill_no.strip(), int(sel_row["product_id"]), selected_item_name, int(ret_qty), float(calc_refund), reason.strip(), str(st.session_state.username)))
+                        VALUES (?, ?, ?, 1, ?, ?, ?)
+                    """, (ret_bill_no.strip(), int(sel_row["product_id"]), selected_item_name, float(sel_row["total_amount"]), reason.strip(), str(st.session_state.username)))
                     conn.commit()
-                    st.success(f"🎉 '{selected_item_name}' (x{ret_qty}) सफलतापूर्वक वापस ले लिया गया और दुकान के स्टॉक में जुड़ गया!")
+                    st.success(f"🎉 '{selected_item_name}' वापस ले लिया गया और स्टॉक में जुड़ गया!")
                     st.rerun()
         else:
-            st.error("❌ यह बिल नंबर नहीं मिला। कृपया सही बिल नंबर डालें।")
-    
-    st.divider()
-    st.markdown("#### 📋 हाल ही में किए गए रिटर्न्स का रिकॉर्ड (Returns History)")
-    ret_history = pd.read_sql_query("SELECT * FROM sales_returns ORDER BY return_date DESC LIMIT 20", conn)
-    if not ret_history.empty:
-        st.dataframe(ret_history.rename(columns={
-            'bill_no': 'बिल नं', 'product_name': 'सामान', 'returned_qty': 'वापस मात्रा', 'refund_amount': 'रिफंड (₹)', 'return_reason': 'कारण', 'returned_by': 'कैशियर', 'return_date': 'तारीख'
-        }), use_container_width=True)
-    else:
-        st.info("अभी कोई रिटर्न रिकॉर्ड मौजूद नहीं है।")
+            st.error("❌ यह बिल नंबर नहीं मिला।")
     conn.close()
 
 # ==========================================
-# 5. बारकोड व QR स्टिकर प्रिंटर (New Feature)
-# ==========================================
-elif mode == "🏷️ बारकोड स्टिकर प्रिंटर":
-    st.subheader("🏷️ प्रोडक्ट बारकोड / QR स्टिकर व प्राइस टैग जनरेटर")
-    st.caption("दुकान के सामान पर चिपकाने के लिए थर्मल स्टिकर / बारकोड लेबल प्रिंट करें")
-
-    conn = sqlite3.connect(DB_NAME)
-    products_df = pd.read_sql_query("SELECT id, serial_no, name, category, sell_price, gst_percent FROM products", conn)
-    
-    c_set = conn.cursor()
-    c_set.execute("SELECT shop_title FROM shop_settings WHERE id=1")
-    s_info = c_set.fetchone()
-    current_shop_name = s_info[0] if s_info else "Raju Bhaiya Store"
-    conn.close()
-
-    if not products_df.empty:
-        products_df["label"] = products_df.apply(lambda r: f"{r['name']} (S/N: {r['serial_no']})" if r['serial_no'] else r['name'], axis=1)
-        selected_prod_label = st.selectbox("जिस सामान का स्टिकर बनाना है चुनें:", products_df["label"].tolist())
-        target_prod = products_df[products_df["label"] == selected_prod_label].iloc[0]
-
-        col_st1, col_st2 = st.columns([1, 1])
-        with col_st1:
-            copies = st.number_input("कितने स्टिकर प्रिंट करने हैं?", min_value=1, max_value=50, value=6)
-            show_price = st.checkbox("स्टीकर पर बिक्री मूल्य (MRP) दिखाएं", value=True)
-            sn_code = target_prod["serial_no"] if target_prod["serial_no"] else f"ITEM-{target_prod['id']:06d}"
-            
-            # बारकोड इमेज URL (Barcode API)
-            barcode_img_url = f"https://bwipjs-api.metafloor.com/?bcid=code128&text={urllib.parse.quote(sn_code)}&scale=2&height=10&includetext"
-
-        with col_st2:
-            st.markdown("#### 👁️ लाइव स्टिकर प्रीव्यू:")
-            price_tag_html = f"<div style='font-size:16px; font-weight:bold; color:black;'>MRP: ₹{target_prod['sell_price']:.2f}</div>" if show_price else ""
-            
-            single_tag_html = f"""
-            <div style="border: 2px dashed #333; padding: 10px; width: 190px; text-align: center; font-family: sans-serif; background: #fff; border-radius: 6px; margin: auto;">
-                <div style="font-size: 11px; font-weight: bold; color: #1E88E5; text-transform: uppercase;">{current_shop_name}</div>
-                <div style="font-size: 13px; font-weight: bold; margin: 3px 0; color: #000;">{target_prod['name']}</div>
-                <img src="{barcode_img_url}" style="max-width: 160px; height: 45px; margin: 4px 0;"/>
-                {price_tag_html}
-                <div style="font-size: 10px; color: #666;">GST {target_prod['gst_percent']}% Incl.</div>
-            </div>
-            """
-            st.components.v1.html(single_tag_html, height=180)
-
-        st.divider()
-        st.markdown("#### 🖨️ स्टिकर प्रिंट शीट (Print Sticker Sheet)")
-        
-        all_tags_html = "".join([f"<div style='border: 1px solid #ccc; padding: 8px; width: 175px; text-align: center; font-family: sans-serif; background: #fff; margin: 6px; display: inline-block; border-radius: 4px;'>"
-                                 f"<div style='font-size: 10px; font-weight: bold; color: #333;'>{current_shop_name}</div>"
-                                 f"<div style='font-size: 12px; font-weight: bold; color: #000;'>{target_prod['name'][:20]}</div>"
-                                 f"<img src='{barcode_img_url}' style='width: 140px; height: 40px; margin: 3px 0;'/>"
-                                 f"{price_tag_html}"
-                                 f"</div>" for _ in range(int(copies))])
-
-        print_sheet_script = f"""
-        <html><body>
-        <button onclick="printLabels()" style="background-color:#1E88E5; color:white; padding:12px 24px; font-size:16px; font-weight:bold; border:none; border-radius:6px; cursor:pointer; width:100%;">🖨️ ये सभी {copies} स्टिकर प्रिंट करें (Print Barcode Sheet)</button>
-        <script>
-        function printLabels() {{
-            var win = window.open('', '', 'height=600,width=800');
-            win.document.write('<html><head><title>Print Barcodes</title></head><body style="margin:10px; font-family:sans-serif;">');
-            win.document.write(`<div style="display:flex; flex-wrap:wrap;">{all_tags_html}</div>`);
-            win.document.write('</body></html>');
-            win.document.close();
-            win.focus();
-            setTimeout(function() {{ win.print(); win.close(); }}, 400);
-        }}
-        </script>
-        </body></html>
-        """
-        st.components.v1.html(print_sheet_script, height=70)
-    else:
-        st.info("दुकान में कोई सामान नहीं है।")
-
-# ==========================================
-# 6. GSTR-1 टैक्स रिपोर्ट व E-Way Bill (New Feature)
-# ==========================================
-elif mode == "📄 GSTR-1 टैक्स रिपोर्ट":
-    st.subheader("📄 GSTR-1 एवं सरकारी टैक्स रिटर्न रिपोर्ट")
-    st.caption("GST पोर्टल के मानक अनुसार 1-क्लिक Excel / CSV फाइल डाउनलोड करें")
-
-    conn = sqlite3.connect(DB_NAME)
-    sales_df = pd.read_sql_query("SELECT * FROM sales", conn)
-    c_set = conn.cursor()
-    c_set.execute("SELECT shop_gstin, shop_title FROM shop_settings WHERE id=1")
-    s_gst = c_set.fetchone()
-    current_gstin = s_gst[0] if s_gst and s_gst[0] else "N/A"
-    conn.close()
-
-    if not sales_df.empty:
-        sales_df["sale_date"] = pd.to_datetime(sales_df["sale_date"])
-        sales_df["month_str"] = sales_df["sale_date"].dt.strftime("%m-%Y")
-
-        c_g1, c_g2 = st.columns(2)
-        all_months = sorted(sales_df["month_str"].unique().tolist(), reverse=True)
-        sel_gst_month = c_g1.selectbox("📅 टैक्स फाइलिंग महीना चुनें:", all_months)
-        c_g2.info(f"🏢 आपकी दुकान का GSTIN: **{current_gstin}**")
-
-        monthly_sales = sales_df[sales_df["month_str"] == sel_gst_month]
-
-        if not monthly_sales.empty:
-            total_taxable_val = monthly_sales["sell_price"] * monthly_sales["quantity"]
-            total_gst_val = monthly_sales["gst_amount"].sum()
-            total_invoice_val = monthly_sales["total_amount"].sum()
-
-            g_m1, g_m2, g_m3, g_m4 = st.columns(4)
-            g_m1.metric("कुल इनवॉइस वैल्यू", f"₹{total_invoice_val:.2f}")
-            g_m2.metric("कर योग्य मूल्य (Taxable)", f"₹{total_taxable_val.sum():.2f}")
-            g_m3.metric("कुल एकत्रित GST", f"₹{total_gst_val:.2f}")
-            g_m4.metric("कुल काटे गए इनवॉइस", f"{monthly_sales['bill_no'].nunique()} बिल्स")
-
-            st.divider()
-
-            # GSTR-1 B2C / B2B फॉर्मेट टेबल
-            gstr1_df = pd.DataFrame({
-                "Invoice Number": monthly_sales["bill_no"],
-                "Invoice Date": monthly_sales["sale_date"].dt.strftime("%d-%b-%Y"),
-                "Customer Name": monthly_sales["customer_name"],
-                "Item Description": monthly_sales["product_name"],
-                "Quantity": monthly_sales["quantity"],
-                "Taxable Value (Rs)": (monthly_sales["sell_price"] * monthly_sales["quantity"]).round(2),
-                "GST Rate (%)": monthly_sales["gst_percent"],
-                "CGST Amount (Rs)": (monthly_sales["gst_amount"] / 2.0).round(2),
-                "SGST Amount (Rs)": (monthly_sales["gst_amount"] / 2.0).round(2),
-                "Total GST (Rs)": monthly_sales["gst_amount"].round(2),
-                "Total Invoice Value (Rs)": monthly_sales["total_amount"].round(2),
-                "Place of Supply": "Madhya Pradesh (23)"
-            })
-
-            st.markdown(f"#### 📋 {sel_gst_month} की GSTR-1 टेबल-वाइज समरी:")
-            st.dataframe(gstr1_df, use_container_width=True)
-
-            # CSV / Excel Download Buttons
-            csv_data = gstr1_df.to_csv(index=False).encode('utf-8')
-            
-            c_d1, c_d2 = st.columns(2)
-            c_d1.download_button(
-                label=f"📥 GSTR-1 रिपोर्ट डाउनलोड करें (CSV Format)",
-                data=csv_data,
-                file_name=f"GSTR1_Report_{sel_gst_month}.csv",
-                mime="text/csv",
-                type="primary",
-                use_container_width=True
-            )
-            
-            with c_d2:
-                # HSN Summary Table
-                hsn_summary = monthly_sales.groupby("product_name").agg(
-                    Total_Qty=('quantity', 'sum'),
-                    Total_Taxable=('sell_price', lambda x: (x * monthly_sales.loc[x.index, 'quantity']).sum()),
-                    Total_GST=('gst_amount', 'sum'),
-                    Total_Value=('total_amount', 'sum')
-                ).reset_index()
-                hsn_csv = hsn_summary.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label=f"📥 HSN समरी रिपोर्ट डाउनलोड करें (CSV)",
-                    data=hsn_csv,
-                    file_name=f"HSN_Summary_{sel_gst_month}.csv",
-                    mime="text/csv",
-                    use_container_width=True
-                )
-        else:
-            st.warning("इस महीने में कोई बिक्री दर्ज नहीं है।")
-    else:
-        st.info("अभी कोई बिक्री रिकॉर्ड मौजूद नहीं है।")
-
-# ==========================================
-# 7. नया स्टॉक / प्रोडक्ट जोड़ें
-# ==========================================
-elif mode == "➕ नया स्टॉक / प्रोडक्ट जोड़ें":
-    st.subheader("➕ नया सामान स्टॉक एवं ऑनलाइन स्टोर में जोड़ें")
-    
-    c_sn_top1, c_sn_top2 = st.columns([3, 1])
-    with c_sn_top2:
-        if st.button("🎲 नया सीरियल नंबर बनाएं (Auto Gen)", use_container_width=True):
-            st.session_state.gen_serial_code = f"SN-{random.randint(100000, 999999)}"
-            st.rerun()
-
-    with st.form("add_item_form", clear_on_submit=True):
-        c_s1, c_s2 = st.columns([2, 2])
-        serial_no_in = c_s1.text_input("सामान का सीरियल नंबर / बारकोड (Serial No. / SKU)", value=st.session_state.gen_serial_code)
-        name = c_s2.text_input("सामान का नाम *", placeholder="उदा. 65W Fast Data Cable / 12x18 Photo Frame")
-        
-        c1, c2, c3 = st.columns(3)
-        category = c1.text_input("कैटेगरी *", value="जनरल")
-        hsn = c2.text_input("HSN / SAC कोड", value="8504")
-        gst_slab = c3.selectbox("GST दर (%) *", [0, 5, 12, 18, 28], index=3)
-        
-        c4, c5, c6 = st.columns(3)
-        buy_p = c4.number_input("खरीद लागत मूल्य (₹) *", min_value=0.0, step=1.0)
-        sell_p = c5.number_input("बिक्री मूल्य (₹) *", min_value=0.0, step=1.0)
-        stock = c6.number_input("स्टॉक मात्रा (Qty) *", min_value=1, step=1, value=10)
-        
-        alert = st.number_input("कम स्टॉक अलर्ट सीमा", min_value=1, value=3)
-        desc = st.text_input("सामान का विवरण / वारंटी नोट", placeholder="उदा. लाइफटाइम गारंटी / ओरिजिनल क्वालिटी")
-        
-        st.markdown("---")
-        st.markdown("#### 📸 फोटो अपलोड करने का माध्यम चुनें:")
-        photo_choice = st.radio("कहाँ से फोटो अपलोड करनी है?", ["📁 गैलरी / कंप्यूटर से फ़ाइल चुनें (Browse)", "📷 लाइव कैमरे से फोटो खींचें", "🔗 ऑनलाइन इमेज लिंक (URL)"], horizontal=True)
-        
-        uploaded_file = None
-        web_link = ""
-        
-        if photo_choice == "📁 गैलरी / कंप्यूटर से फ़ाइल चुनें (Browse)":
-            uploaded_file = st.file_uploader("कंप्यूटर या मोबाइल से फोटो सेलेक्ट करें", type=["jpg", "jpeg", "png", "webp"])
-        elif photo_choice == "📷 लाइव कैमरे से फोटो खींचें":
-            uploaded_file = st.camera_input("कैमरा चालू करके फोटो क्लिक करें")
-        else:
-            web_link = st.text_input("फोटो का ऑनलाइन लिंक (Image URL)", placeholder="https://example.com/product.jpg")
-
-        is_on = st.checkbox("🌐 इस सामान को ऑनलाइन डिजिटल कैटलॉग पर लाइव दिखाएं", value=True)
-
-        if st.form_submit_button("💾 नया स्टॉक सुरक्षित करें", use_container_width=True):
-            if not name.strip():
-                st.warning("⚠️ कृपया सामान का नाम दर्ज करें!")
-            else:
-                final_photo_data = ""
-                if uploaded_file is not None:
-                    file_bytes = uploaded_file.getvalue()
-                    encoded = base64.b64encode(file_bytes).decode()
-                    mime_type = uploaded_file.type
-                    final_photo_data = f"data:{mime_type};base64,{encoded}"
-                elif web_link.strip():
-                    final_photo_data = web_link.strip()
-
-                conn = sqlite3.connect(DB_NAME)
-                cursor = conn.cursor()
-                cursor.execute("""
-                    INSERT INTO products (serial_no, name, category, hsn_code, buy_price, sell_price, gst_percent, stock, min_alert, description, image_url, is_online)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (serial_no_in.strip(), name.strip(), category.strip(), hsn.strip(), buy_p, sell_p, float(gst_slab), stock, alert, desc.strip(), final_photo_data, 1 if is_on else 0))
-                conn.commit()
-                conn.close()
-                st.success(f"✅ '{name}' (S/N: {serial_no_in}) सफलतापूर्वक स्टॉक में जुड़ गया!")
-                st.session_state.gen_serial_code = f"SN-{random.randint(100000, 999999)}"
-
-# ==========================================
-# 8. स्टॉक व ऑनलाइन शो
-# ==========================================
-elif mode == "📦 स्टॉक व ऑनलाइन शो":
-    st.subheader("📦 दुकान का लाइव स्टॉक एवं GST लिस्टिंग")
-    conn = sqlite3.connect(DB_NAME)
-    df = pd.read_sql_query("SELECT id, serial_no, name, category, hsn_code, buy_price, sell_price, gst_percent, stock, min_alert, is_online FROM products", conn)
-    conn.close()
-
-    search = st.text_input("🔍 सामान या सीरियल नंबर सर्च करें")
-    if search:
-        df = df[df["name"].str.contains(search, case=False, na=False) | df["serial_no"].str.contains(search, case=False, na=False)]
-
-    st.dataframe(df.rename(columns={
-        "serial_no": "सीरियल नं",
-        "name": "सामान",
-        "category": "कैटेगरी",
-        "hsn_code": "HSN कोड",
-        "buy_price": "खरीद दर (₹)",
-        "sell_price": "बिक्री दर (₹)",
-        "gst_percent": "GST %",
-        "stock": "स्टॉक मात्रा",
-        "min_alert": "अलर्ट सीमा",
-        "is_online": "ऑनलाइन शो (1=हाँ, 0=ना)"
-    }), use_container_width=True)
-
-# ==========================================
-# 9. उधारी/खाता अलर्ट
-# ==========================================
-elif mode == "📒 उधारी/खाता अलर्ट":
-    st.subheader("📒 ग्राहक उधारी रजिस्टर एवं WhatsApp पेमेंट रिमाइंडर")
-    conn = sqlite3.connect(DB_NAME)
-    
-    c_set = conn.cursor()
-    c_set.execute("SELECT shop_title, shop_phone FROM shop_settings WHERE id=1")
-    s_info = c_set.fetchone()
-    current_shop_name = s_info[0] if s_info else "Raju Bhaiya Store"
-    current_shop_phone = s_info[1] if s_info and s_info[1] else "8349596263"
-
-    udhar_df = pd.read_sql_query("SELECT id, bill_no, customer_name, customer_phone, total_amount, paid_amount, due_date, status FROM udhar_ledger WHERE status='PENDING'", conn)
-    
-    if not udhar_df.empty:
-        udhar_df["baki_amount"] = udhar_df["total_amount"] - udhar_df["paid_amount"]
-        udhar_df["due_date_dt"] = pd.to_datetime(udhar_df["due_date"])
-        today_dt = pd.to_datetime(date.today())
-
-        overdue = udhar_df[udhar_df["due_date_dt"] < today_dt]
-        today_due = udhar_df[udhar_df["due_date_dt"] == today_dt]
-
-        if not overdue.empty:
-            st.error(f"🚨 अलर्ट: {len(overdue)} ग्राहकों की उधारी चुकाने की अंतिम तारीख निकल चुकी है!")
-        if not today_due.empty:
-            st.warning(f"⚠️ ध्यान दें: {len(today_due)} ग्राहकों से आज उधारी वसूली की तारीख है!")
-
-        st.markdown("#### 📋 सक्रिय उधारी लिस्ट एवं 1-क्लिक WhatsApp तगादा:")
-        for idx, row in udhar_df.iterrows():
-            c_u1, c_u2, c_u3, c_u4 = st.columns([3, 2, 2, 3])
-            is_overdue = row['due_date_dt'] < today_dt
-            status_tag = "🔴 तारीख निकल गई!" if is_overdue else "🟢 सक्रिय"
-            
-            c_u1.write(f"**{row['customer_name']}**\n\n📱 `{row['customer_phone'] if row['customer_phone'] else 'N/A'}`\n\nबिल: `{row['bill_no']}`")
-            c_u2.write(f"बकाया: **₹{row['baki_amount']:.2f}**\n\n(कुल ₹{row['total_amount']:.2f})")
-            c_u3.write(f"देय तारीख:\n**{row['due_date']}**\n\n{status_tag}")
-            
-            reminder_text = (
-                f"नमस्ते *{row['customer_name']}* जी,\n\n"
-                f"यह संदेश *{current_shop_name}* की तरफ से है।\n"
-                f"आपके बिल नं. *{row['bill_no']}* का कुल बकाया राशि *₹{row['baki_amount']:.2f}* है, "
-                f"जिसके भुगतान की नियत तारीख *{row['due_date']}* थी।\n\n"
-                f"{'⚠️ *सूचना:* कृपया जल्द से जल्द भुगतान सुनिश्चित करें।' if is_overdue else 'कृपया समय पर भुगतान कर सहयोग करें।'}\n\n"
-                f"धन्यवाद,\n*{current_shop_name}*\n📞 संपर्क: +91 {current_shop_phone}"
-            )
-            
-            c_phone_clean = "".join([d for d in str(row['customer_phone']) if d.isdigit()])
-            if len(c_phone_clean) == 10:
-                c_phone_clean = "91" + c_phone_clean
-                
-            wa_reminder_url = f"https://wa.me/{c_phone_clean}?text={urllib.parse.quote(reminder_text)}"
-
-            with c_u4:
-                if row['customer_phone'] and len(c_phone_clean) >= 10:
-                    st.link_button("📲 WhatsApp तगादा भेजें", wa_reminder_url, use_container_width=True)
-                else:
-                    st.caption("⚠️ मोबाइल नंबर नहीं है")
-                    
-                if st.button(f"💰 पूरा भुगतान मिला", key=f"pay_{row['id']}", use_container_width=True):
-                    c = conn.cursor()
-                    c.execute("UPDATE udhar_ledger SET paid_amount = total_amount, status = 'PAID' WHERE id = ?", (int(row['id']),))
-                    conn.commit()
-                    st.success(f"{row['customer_name']} का खाता चुकता हो गया!")
-                    st.rerun()
-            st.divider()
-    else:
-        st.success("दुकान में किसी ग्राहक की कोई उधारी बकाया नहीं है!")
-    conn.close()
-
-# ==========================================
-# 10. ऑपरेटर बिक्री रिपोर्ट
-# ==========================================
-elif mode == "👔 ऑपरेटर बिक्री रिपोर्ट":
-    st.subheader("👔 ऑपरेटर बिक्री एवं परफॉरमेंस रिपोर्ट")
-    
-    conn = sqlite3.connect(DB_NAME)
-    sales_df = pd.read_sql_query("SELECT * FROM sales", conn)
-    conn.close()
-
-    if not sales_df.empty:
-        sales_df["sale_date"] = pd.to_datetime(sales_df["sale_date"])
-        all_sellers = ["सभी ऑपरेटर (All Staff)"] + sorted(sales_df["sold_by"].dropna().unique().tolist())
-
-        c_f1, c_f2 = st.columns([2, 2])
-        chosen_seller = c_f1.selectbox("👤 किस ऑपरेटर की बिक्री देखनी है?", all_sellers)
-        time_period = c_f2.selectbox("📅 समय सीमा चुनें", ["आज (Today)", "कल (Yesterday)", "पिछले 7 दिन", "पिछले 30 दिन", "शुरुआत से अब तक (All Time)"])
-
-        now = datetime.now()
-        filtered_df = sales_df.copy()
-
-        if chosen_seller != "सभी ऑपरेटर (All Staff)":
-            filtered_df = filtered_df[filtered_df["sold_by"] == chosen_seller]
-
-        if time_period == "आज (Today)":
-            filtered_df = filtered_df[filtered_df["sale_date"].dt.date == now.date()]
-        elif time_period == "कल (Yesterday)":
-            filtered_df = filtered_df[filtered_df["sale_date"].dt.date == (now - timedelta(days=1)).date()]
-        elif time_period == "पिछले 7 दिन":
-            filtered_df = filtered_df[filtered_df["sale_date"] >= (now - timedelta(days=7))]
-        elif time_period == "पिछले 30 दिन":
-            filtered_df = filtered_df[filtered_df["sale_date"] >= (now - timedelta(days=30))]
-
-        st.divider()
-
-        if not filtered_df.empty:
-            total_op_sales = filtered_df["total_amount"].sum()
-            total_op_profit = filtered_df["profit"].sum()
-            total_bills_count = filtered_df["bill_no"].nunique()
-            total_items_count = filtered_df["quantity"].sum()
-
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("कुल बिल काटे", f"{total_bills_count} बिल")
-            m2.metric("कुल सामान बेचा", f"{total_items_count} पीस")
-            m3.metric("कुल बिक्री राशि", f"₹{total_op_sales:.2f}")
-            m4.metric("शुद्ध मुनाफ़ा दिलाया", f"₹{total_op_profit:.2f}")
-
-            st.divider()
-
-            col_s1, col_s2 = st.columns([1, 1])
-            with col_s1:
-                st.markdown("#### 📦 कौन-कौन सा सामान कितना बेचा:")
-                item_breakdown = filtered_df.groupby("product_name").agg(
-                    कुल_मात्रा=('quantity', 'sum'),
-                    कुल_बिक्री=('total_amount', 'sum'),
-                    मुनाफा=('profit', 'sum')
-                ).reset_index().sort_values(by="कुल_मात्रा", ascending=False)
-                
-                st.dataframe(item_breakdown.rename(columns={
-                    "product_name": "सामान का नाम",
-                    "कुल_मात्रा": "बेची गई मात्रा",
-                    "कुल_बिक्री": "बिक्री (₹)",
-                    "मुनाफा": "कमाई (₹)"
-                }), use_container_width=True)
-
-            with col_s2:
-                st.markdown("#### 📊 बिक्री चार्ट")
-                fig_op = px.bar(item_breakdown.head(8), x="product_name", y="कुल_बिक्री", color="कुल_मात्रा", title="टॉप सेलिंग आइटम्स")
-                st.plotly_chart(fig_op, use_container_width=True)
-        else:
-            st.warning("चुने गए समय और ऑपरेटर के लिए कोई रिकॉर्ड नहीं मिला!")
-    else:
-        st.info("अभी कोई बिक्री डेटा उपलब्ध नहीं है।")
-
-# ==========================================
-# 11. ऑपरेटर मासिक कमीशन
-# ==========================================
-elif mode == "💵 ऑपरेटर मासिक कमीशन":
-    st.subheader("💵 ऑपरेटर मासिक कमीशन व पे-आउट रजिस्टर")
-    st.caption("मुनाफ़े पर आधारित मासिक कमीशन का स्वचालित हिसाब")
-
-    conn = sqlite3.connect(DB_NAME)
-    sales_df = pd.read_sql_query("SELECT * FROM sales WHERE sold_by != 'admin'", conn)
-    users_df = pd.read_sql_query("SELECT username, commission_percent FROM users WHERE role='operator'", conn)
-    conn.close()
-
-    if not users_df.empty:
-        col_c1, col_c2 = st.columns(2)
-        op_list = users_df["username"].tolist()
-        sel_op = col_c1.selectbox("👤 ऑपरेटर चुनें:", op_list)
-        
-        current_year = datetime.now().year
-        months_list = [f"{m:02d}-{current_year}" for m in range(1, 13)]
-        default_idx = datetime.now().month - 1
-        sel_month = col_c2.selectbox("📅 महीना चुनें (MM-YYYY):", months_list, index=default_idx)
-
-        op_info = users_df[users_df["username"] == sel_op].iloc[0]
-        comm_pct = float(op_info["commission_percent"]) if op_info["commission_percent"] else 0.0
-
-        st.info(f"💡 **{sel_op}** का निर्धारित मुनाफ़ा कमीशन स्लैब: **{comm_pct}%**")
-
-        if not sales_df.empty:
-            sales_df["sale_date"] = pd.to_datetime(sales_df["sale_date"])
-            sales_df["month_str"] = sales_df["sale_date"].dt.strftime("%m-%Y")
-            
-            monthly_op_sales = sales_df[(sales_df["sold_by"] == sel_op) & (sales_df["month_str"] == sel_month)]
-
-            if not monthly_op_sales.empty:
-                m_sales = monthly_op_sales["total_amount"].sum()
-                m_profit = monthly_op_sales["profit"].sum()
-                
-                if "operator_commission" in monthly_op_sales.columns and monthly_op_sales["operator_commission"].sum() > 0:
-                    total_comm_earned = monthly_op_sales["operator_commission"].sum()
-                else:
-                    total_comm_earned = (m_profit * comm_pct) / 100.0 if m_profit > 0 else 0.0
-
-                c_m1, c_m2, c_m3 = st.columns(3)
-                c_m1.metric(f"महीने की कुल बिक्री ({sel_month})", f"₹{m_sales:.2f}")
-                c_m2.metric("दुकान को हुआ कुल मुनाफ़ा", f"₹{m_profit:.2f}")
-                c_m3.metric("🎯 ऑपरेटर का कुल कमीशन", f"₹{total_comm_earned:.2f}")
-
-                st.divider()
-                st.markdown(f"#### 📋 {sel_op} द्वारा {sel_month} में की गई सभी बिलिंग का हिसाब:")
-                st.dataframe(monthly_op_sales[["bill_no", "sale_date", "product_name", "quantity", "total_amount", "profit", "operator_commission"]].rename(columns={
-                    "bill_no": "बिल नं",
-                    "sale_date": "तारीख",
-                    "product_name": "सामान",
-                    "quantity": "मात्रा",
-                    "total_amount": "बिक्री (₹)",
-                    "profit": "मुनाफ़ा (₹)",
-                    "operator_commission": "कमीशन (₹)"
-                }), use_container_width=True)
-            else:
-                st.warning(f"{sel_op} ने {sel_month} महीने में कोई बिलिंग नहीं की है।")
-        else:
-            st.info("अभी कोई ऑपरेटर बिक्री डेटा उपलब्ध नहीं है।")
-    else:
-        st.info("दुकान में कोई ऑपरेटर नहीं है।")
-
-# ==========================================
-# 12. एडमिन डैशबोर्ड
-# ==========================================
-elif mode == "📊 एडमिन डैशबोर्ड":
-    st.markdown("<h2 style='margin-bottom:0px;'>📊 एंटरप्राइज बिज़नेस इंटेलिजेंस व एनालिटिक्स</h2>", unsafe_allow_html=True)
-    st.caption("रियल-टाइम वित्तीय विश्लेषण, इन्वेंटरी हेल्थ और परफॉरमेंस इनसाइट्स")
-
-    conn = sqlite3.connect(DB_NAME)
-    sales_df = pd.read_sql_query("SELECT * FROM sales", conn)
-    products_df = pd.read_sql_query("SELECT * FROM products", conn)
-    udhar_df = pd.read_sql_query("SELECT * FROM udhar_ledger", conn)
-    conn.close()
-
-    if not sales_df.empty:
-        sales_df["sale_date"] = pd.to_datetime(sales_df["sale_date"])
-        now = datetime.now()
-
-        today_sales = sales_df[sales_df["sale_date"].dt.date == now.date()]
-        total_rev = sales_df["total_amount"].sum()
-        total_prof = sales_df["profit"].sum()
-        margin_pct = (total_prof / total_rev * 100) if total_rev > 0 else 0.0
-        
-        pending_udhar_total = (udhar_df[udhar_df["status"] == "PENDING"]["total_amount"] - udhar_df[udhar_df["status"] == "PENDING"]["paid_amount"]).sum() if not udhar_df.empty else 0.0
-        stock_buy_val = (products_df["stock"] * products_df["buy_price"]).sum() if not products_df.empty else 0.0
-        stock_sell_val = (products_df["stock"] * products_df["sell_price"]).sum() if not products_df.empty else 0.0
-
-        k1, k2, k3, k4, k5 = st.columns(5)
-        k1.metric("💵 आज की बिक्री", f"₹{today_sales['total_amount'].sum():.2f}", f"मुनाफ़ा: ₹{today_sales['profit'].sum():.2f}")
-        k2.metric("💰 कुल शुद्ध मुनाफ़ा", f"₹{total_prof:.2f}", f"मार्जिन: {margin_pct:.1f}%")
-        k3.metric("📦 इन्वेंटरी वैल्यूएशन", f"₹{stock_buy_val:.2f}", f"बिक्री मूल्य: ₹{stock_sell_val:.2f}")
-        k4.metric("📒 मार्केट में उधारी", f"₹{pending_udhar_total:.2f}", "बकाया वसूली")
-        k5.metric("🧾 कुल काटे गए बिल", f"{sales_df['bill_no'].nunique()} बिल", f"{sales_df['quantity'].sum()} कुल पीस")
-
-        st.divider()
-
-        tab_rev, tab_prod, tab_inv, tab_udhar, tab_staff = st.tabs([
-            "📈 1. सेल व रेवेन्यू ट्रैकर",
-            "🏆 2. प्रोडक्ट परफॉरमेंस (Fast vs Slow)",
-            "📦 3. इन्वेंटरी व स्टॉक हेल्थ",
-            "📒 4. उधारी व रिकवरी रिपोर्ट",
-            "👔 5. ऑपरेटर लीडरबोर्ड"
-        ])
-
-        with tab_rev:
-            daily_grp = sales_df.groupby(sales_df["sale_date"].dt.date).agg(
-                कुल_बिक्री=('total_amount', 'sum'),
-                शुद्ध_मुनाफा=('profit', 'sum')
-            ).reset_index().rename(columns={'sale_date': 'तारीख'})
-
-            fig_trend = go.Figure()
-            fig_trend.add_trace(go.Scatter(x=daily_grp['तारीख'], y=daily_grp['कुल_बिक्री'], mode='lines+markers', name='बिक्री (₹)', line=dict(color='#1E88E5', width=3)))
-            fig_trend.add_trace(go.Scatter(x=daily_grp['तारीख'], y=daily_grp['शुद्ध_मुनाफा'], mode='lines+markers', name='मुनाफ़ा (₹)', line=dict(color='#2ed573', width=3)))
-            fig_trend.update_layout(height=340, margin=dict(l=20, r=20, t=30, b=20), hovermode='x unified')
-            st.plotly_chart(fig_trend, use_container_width=True)
-
-            c_p1, c_p2 = st.columns([1, 1])
-            with c_p1:
-                st.markdown("#### 💳 पेमेंट मोड ब्रेकडाउन")
-                pay_grp = sales_df.groupby("payment_mode")["total_amount"].sum().reset_index()
-                fig_pay = px.pie(pay_grp, names="payment_mode", values="total_amount", hole=0.45)
-                st.plotly_chart(fig_pay, use_container_width=True)
-            with c_p2:
-                st.markdown("#### 🕒 घंटे के हिसाब से बिक्री (Peak Hours)")
-                sales_df['hour'] = sales_df['sale_date'].dt.hour
-                hr_grp = sales_df.groupby('hour')['total_amount'].sum().reset_index()
-                fig_hr = px.bar(hr_grp, x='hour', y='total_amount', labels={'hour': 'समय (24 घंटे)', 'total_amount': 'बिक्री (₹)'}, color='total_amount')
-                st.plotly_chart(fig_hr, use_container_width=True)
-
-        with tab_prod:
-            col_tp1, col_tp2 = st.columns(2)
-            prod_perf = sales_df.groupby("product_name").agg(
-                बिका_स्टॉक=('quantity', 'sum'),
-                कुल_सेल=('total_amount', 'sum'),
-                कमाई=('profit', 'sum')
-            ).reset_index()
-
-            with col_tp1:
-                st.markdown("#### 🔥 सबसे ज़्यादा बिकने वाले सामान (Top Selling)")
-                top_10 = prod_perf.sort_values(by="बिका_स्टॉक", ascending=False).head(10)
-                st.dataframe(top_10.rename(columns={'product_name': 'सामान', 'बिका_स्टॉक': 'कुल पीस', 'कुल_सेल': 'बिक्री (₹)', 'कमाई': 'मुनाफ़ा (₹)'}), use_container_width=True)
-
-            with col_tp2:
-                st.markdown("#### 💎 सबसे ज़्यादा मुनाफ़ा देने वाले सामान (Most Profitable)")
-                top_prof = prod_perf.sort_values(by="कमाई", ascending=False).head(10)
-                st.dataframe(top_prof.rename(columns={'product_name': 'सामान', 'बिका_स्टॉक': 'कुल पीस', 'कुल_सेल': 'बिक्री (₹)', 'कमाई': 'मुनाफ़ा (₹)'}), use_container_width=True)
-
-            st.divider()
-            st.markdown("#### ⚠️ कम बिकने वाले / न बिकने वाले सामान (Slow Moving & Dead Stock)")
-            sold_ids = sales_df["product_id"].unique()
-            dead_stock = products_df[~products_df["id"].isin(sold_ids)]
-            if not dead_stock.empty:
-                st.warning(f"🚨 कुल {len(dead_stock)} सामान ऐसे हैं जिनकी एक भी यूनिट नहीं बिकी है!")
-                st.dataframe(dead_stock[["serial_no", "name", "category", "stock", "buy_price", "sell_price"]], use_container_width=True)
-            else:
-                st.success("🎉 दुकान के सभी सामान सक्रिय रूप से बिक रहे हैं।")
-
-        with tab_inv:
-            st.markdown("#### 📦 स्टॉक अलर्ट व इन्वेंटरी हेल्थ रिपोर्ट")
-            low_stock_items = products_df[products_df["stock"] <= products_df["min_alert"]]
-            c_in1, c_in2 = st.columns(2)
-            with c_in1:
-                if not low_stock_items.empty:
-                    st.error(f"🚨 रिऑर्डर करें: {len(low_stock_items)} सामान कम स्टॉक सीमा पर हैं!")
-                    st.dataframe(low_stock_items[["name", "stock", "min_alert", "buy_price"]], use_container_width=True)
-                else:
-                    st.success("दुकान के सभी सामान पर्याप्त स्टॉक में हैं।")
-            with c_in2:
-                cat_grp = products_df.groupby("category")["stock"].sum().reset_index()
-                fig_cat = px.pie(cat_grp, names="category", values="stock", hole=0.3)
-                st.plotly_chart(fig_cat, use_container_width=True)
-
-        with tab_udhar:
-            st.markdown("#### 📒 ग्राहक उधारी रिकवरी ट्रैकिंग")
-            if not udhar_df.empty:
-                udhar_df["due_date_dt"] = pd.to_datetime(udhar_df["due_date"])
-                udhar_df["baki"] = udhar_df["total_amount"] - udhar_df["paid_amount"]
-                total_market_udhar = udhar_df[udhar_df["status"] == "PENDING"]["baki"].sum()
-                recovered_total = udhar_df[udhar_df["status"] == "PAID"]["total_amount"].sum()
-                
-                u_m1, u_m2 = st.columns(2)
-                u_m1.metric("कुल बकाया उधारी", f"₹{total_market_udhar:.2f}")
-                u_m2.metric("कुल रिकवर राशि", f"₹{recovered_total:.2f}")
-
-                st.dataframe(udhar_df[["bill_no", "customer_name", "customer_phone", "total_amount", "baki", "due_date", "status"]], use_container_width=True)
-            else:
-                st.success("दुकान में किसी ग्राहक की कोई उधारी नहीं है।")
-
-        with tab_staff:
-            st.markdown("#### 🏆 ऑपरेटर परफॉरमेंस व रेवेन्यू रैंकिंग")
-            staff_grp = sales_df.groupby("sold_by").agg(
-                कुल_बिल=('bill_no', 'nunique'),
-                कुल_बिक्री=('total_amount', 'sum'),
-                शुद्ध_कमाई=('profit', 'sum')
-            ).reset_index().sort_values(by="कुल_बिक्री", ascending=False)
-            
-            c_st1, c_st2 = st.columns([1, 1])
-            with c_st1:
-                st.dataframe(staff_grp.rename(columns={'sold_by': 'ऑपरेटर', 'कुल_बिल': 'बिल काटे', 'कुल_बिक्री': 'सेल (₹)', 'शुद्ध_कमाई': 'मुनाफ़ा (₹)'}), use_container_width=True)
-            with c_st2:
-                fig_staff = px.bar(staff_grp, x="sold_by", y="कुल_बिक्री", color="शुद्ध_कमाई", title="स्टाफ सेल तुलना")
-                st.plotly_chart(fig_staff, use_container_width=True)
-    else:
-        st.info("📊 बिज़नेस एनालिटिक्स डैशबोर्ड देखने के लिए पहले कुछ बिल काटें।")
-
-# ==========================================
-# 13. ऑपरेटर मैनेजमेंट
-# ==========================================
-elif mode == "👥 ऑपरेटर मैनेजमेंट":
-    st.subheader("👥 ऑपरेटर (स्टाफ) आईडी, कमीशन % एवं परमिशन कंट्रोल")
-    
-    tab1, tab2, tab3 = st.tabs(["➕ नया ऑपरेटर बनाएं", "⚙️ परमिशन व कमीशन % अपडेट", "🔑 सीधा पासवर्ड रीसेट (Admin)"])
-    
-    with tab1:
-        with st.form("add_user_form", clear_on_submit=True):
-            st.markdown("#### 1. ऑपरेटर क्रेडेंशियल्स एवं कमीशन")
-            c_u1, c_u2, c_u3 = st.columns(3)
-            u_name = c_u1.text_input("नया यूज़रनेम *", placeholder="उदा. rahul, sandeep")
-            u_phone = c_u2.text_input("ऑपरेटर का मोबाइल नंबर *", placeholder="उदा. 98XXXXXXXX", max_chars=10)
-            u_comm = c_u3.number_input("मुनाफ़ा कमीशन (%):", min_value=0.0, max_value=100.0, value=5.0, step=0.5)
-            u_pass = st.text_input("पासवर्ड *", type="password")
-            
-            st.markdown("#### 2. इस ऑपरेटर को कौन-से एक्सेस देने हैं?")
-            selected_permissions = []
-            
-            p_cols = st.columns(2)
-            for i, perm in enumerate(ALL_PERMISSIONS):
-                with p_cols[i % 2]:
-                    is_checked = perm in ["🛍️ ऑनलाइन स्टोर देखें", "⚡ सुपरफास्ट POS बिलिंग", "📦 स्टॉक व ऑनलाइन शो"]
-                    if st.checkbox(perm, value=is_checked, key=f"new_perm_{perm}"):
-                        selected_permissions.append(perm)
-            
-            if st.form_submit_button("💾 ऑपरेटर सुरक्षित करें", use_container_width=True):
-                if u_name.strip() and u_pass.strip() and u_phone.strip():
-                    conn = sqlite3.connect(DB_NAME)
-                    cursor = conn.cursor()
-                    try:
-                        perms_json = json.dumps(selected_permissions)
-                        cursor.execute("INSERT INTO users (username, password, phone, commission_percent, role, permissions) VALUES (?, ?, ?, ?, 'operator', ?)", (u_name.strip(), u_pass.strip(), u_phone.strip(), float(u_comm), perms_json))
-                        conn.commit()
-                        st.success(f"✅ ऑपरेटर '{u_name}' (कमीशन: {u_comm}%) सफलतापूर्वक बन गया!")
-                    except sqlite3.IntegrityError:
-                        st.error("⚠️ यह यूज़रनेम पहले से मौजूद है!")
-                    conn.close()
-                else:
-                    st.warning("कृपया यूज़रनेम, मोबाइल नंबर और पासवर्ड तीनों भरें!")
-
-    with tab2:
-        st.markdown("#### ⚙️ ऑपरेटर परमिशन, कमीशन व मोबाइल एडिट करें")
-        conn = sqlite3.connect(DB_NAME)
-        ops_df = pd.read_sql_query("SELECT id, username, phone, commission_percent, permissions FROM users WHERE role='operator'", conn)
-        conn.close()
-        
-        if not ops_df.empty:
-            selected_op = st.selectbox("ऑपरेटर चुनें:", ops_df["username"].tolist())
-            op_row = ops_df[ops_df["username"] == selected_op].iloc[0]
-            
-            try:
-                curr_perms = json.loads(op_row["permissions"]) if op_row["permissions"] else []
-            except:
-                curr_perms = []
-            
-            with st.form("edit_perms_form"):
-                c_e1, c_e2 = st.columns(2)
-                up_phone = c_e1.text_input("मोबाइल नंबर:", value=str(op_row["phone"]) if op_row["phone"] else "", max_chars=10)
-                up_comm = c_e2.number_input("मुनाफ़ा कमीशन (%):", min_value=0.0, max_value=100.0, value=float(op_row["commission_percent"]) if op_row["commission_percent"] else 0.0, step=0.5)
-
-                st.write(f"**'{selected_op}' के चालू एक्सेस:**")
-                updated_perms = []
-                e_cols = st.columns(2)
-                for i, perm in enumerate(ALL_PERMISSIONS):
-                    with e_cols[i % 2]:
-                        checked = perm in curr_perms
-                        if st.checkbox(perm, value=checked, key=f"edit_perm_{selected_op}_{perm}"):
-                            updated_perms.append(perm)
-                
-                if st.form_submit_button("🔄 विवरण व कमीशन अपडेट करें", use_container_width=True):
-                    conn = sqlite3.connect(DB_NAME)
-                    c = conn.cursor()
-                    c.execute("UPDATE users SET phone = ?, commission_percent = ?, permissions = ? WHERE username = ?", (up_phone.strip(), float(up_comm), json.dumps(updated_perms), selected_op))
-                    conn.commit()
-                    conn.close()
-                    st.success(f"✅ '{selected_op}' का विवरण और {up_comm}% कमीशन अपडेट हो गया!")
-                    st.rerun()
-        else:
-            st.info("अभी कोई ऑपरेटर मौजूद नहीं है।")
-
-    with tab3:
-        st.markdown("#### 🔑 एडमिन द्वारा किसी ऑपरेटर का पासवर्ड सीधे बदलें")
-        if not ops_df.empty:
-            with st.form("admin_reset_pass"):
-                target_op = st.selectbox("जिस ऑपरेटर का पासवर्ड बदलना है:", ops_df["username"].tolist(), key="admin_sel_op")
-                admin_new_pass = st.text_input("नया पासवर्ड सेट करें:", type="password")
-                if st.form_submit_button("💾 पासवर्ड तुरंत बदलें", use_container_width=True):
-                    if len(admin_new_pass.strip()) >= 4:
-                        conn = sqlite3.connect(DB_NAME)
-                        c = conn.cursor()
-                        c.execute("UPDATE users SET password = ? WHERE username = ?", (admin_new_pass.strip(), target_op))
-                        conn.commit()
-                        conn.close()
-                        st.success(f"✅ ऑपरेटर '{target_op}' का नया पासवर्ड तुरंत सेट हो गया!")
-                    else:
-                        st.error("पासवर्ड कम से कम 4 अक्षरों का होना चाहिए!")
-        else:
-            st.info("कोई ऑपरेटर उपलब्ध नहीं है।")
-
-# ==========================================
-# 14. स्टोर सेटिंग्स
-# ==========================================
-elif mode == "🎨 स्टोर बैनर व सेटिंग्स":
-    st.subheader("🎨 ऑनलाइन स्टोर ब्रांडिंग, GSTIN व UPI सेटिंग्स")
-    
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT shop_title, shop_subtitle, shop_phone, upi_id, shop_gstin, banner_image FROM shop_settings WHERE id=1")
-    current_settings = c.fetchone()
-    conn.close()
-    
-    cur_title = current_settings[0] if current_settings else "Raju Bhaiya Online Store"
-    cur_sub = current_settings[1] if current_settings else "डिजिटल प्रोडक्ट कैटलॉग एवं ऑनलाइन ऑर्डर"
-    cur_phone = current_settings[2] if current_settings and current_settings[2] else "8349596263"
-    cur_upi = current_settings[3] if current_settings and current_settings[3] else "8349596263@upi"
-    cur_gstin = current_settings[4] if current_settings and len(current_settings) > 4 and current_settings[4] else ""
-    cur_banner = current_settings[5] if current_settings and len(current_settings) > 5 else ""
-
-    with st.form("shop_settings_form"):
-        st.markdown("#### 1. दुकान / स्टोर का नाम एवं संपर्क")
-        c_st1, c_st2 = st.columns(2)
-        new_title = c_st1.text_input("स्टोर का नाम (Store Title)", value=cur_title)
-        new_phone = c_st2.text_input("स्टोर संपर्क नंबर (Mobile / WhatsApp No.) *", value=cur_phone, max_chars=10)
-        
-        c_st3, c_st4 = st.columns(2)
-        new_upi = c_st3.text_input("💳 दुकान की UPI ID *", value=cur_upi)
-        new_gstin = c_st4.text_input("🏢 GSTIN नंबर (यदि लागू हो)", value=cur_gstin, placeholder="उदा. 23AAAAA0000A1Z5")
-        
-        new_sub = st.text_input("टैगलाइन / सबटाइटल (Subtitle)", value=cur_sub)
-        
-        st.markdown("---")
-        st.markdown("#### 2. दुकान का लोगो / बैनर फोटो")
-        
-        if cur_banner and len(str(cur_banner).strip()) > 5:
-            st.image(cur_banner, caption="वर्तमान बैनर / फोटो", width=200)
-            
-        banner_choice = st.radio("फोटो अपलोड का माध्यम:", ["📁 कंप्यूटर / मोबाइल से फोटो अपलोड करें", "🔗 ऑनलाइन वेब लिंक (Image URL)"], horizontal=True)
-        
-        banner_file = None
-        banner_url_in = ""
-        
-        if banner_choice == "📁 कंप्यूटर / मोबाइल से फोटो अपलोड करें":
-            banner_file = st.file_uploader("दुकान का लोगो या बैनर फोटो चुनें", type=["jpg", "jpeg", "png", "webp"])
-        else:
-            banner_url_in = st.text_input("फोटो का ऑनलाइन लिंक (Image URL)", value=cur_banner if cur_banner.startswith("http") else "")
-
-        if st.form_submit_button("💾 सेटिंग्स सुरक्षित करें", use_container_width=True):
-            final_banner_data = cur_banner
-            if banner_file is not None:
-                b_bytes = banner_file.getvalue()
-                b64 = base64.b64encode(b_bytes).decode()
-                m_type = banner_file.type
-                final_banner_data = f"data:{m_type};base64,{b64}"
-            elif banner_url_in.strip():
-                final_banner_data = banner_url_in.strip()
-
-            conn = sqlite3.connect(DB_NAME)
-            c = conn.cursor()
-            c.execute("UPDATE shop_settings SET shop_title=?, shop_subtitle=?, shop_phone=?, upi_id=?, shop_gstin=?, banner_image=? WHERE id=1", (new_title.strip(), new_sub.strip(), new_phone.strip(), new_upi.strip(), new_gstin.strip(), final_banner_data))
-            conn.commit()
-            conn.close()
-            st.success("✅ ऑनलाइन स्टोर का नाम, GSTIN, संपर्क नंबर, UPI ID और फोटो अपडेट हो गया!")
-            st.rerun()# ==========================================
-# ==========================================
-# 5. बारकोड व QR स्टिकर प्रिंटर (रीप्रिंट व कस्टम रेंज सपोर्ट सहित)
+# 5. बारकोड व QR स्टिकर प्रिंटर
 # ==========================================
 elif mode == "🏷️ बारकोड स्टिकर प्रिंटर":
     st.subheader("🏷️ प्रोडक्ट बारकोड स्टिकर व प्राइस टैग जनरेटर")
-    st.caption("यूनिक सीरियल नंबर बारकोड प्रिंट करें अथवा खराब हुए स्टिकर दोबारा निकालें")
+    st.caption("चयनित सामान के प्रत्येक उपलब्ध पीस का अलग-अलग बारकोड स्टिकर प्रिंट करें")
 
     conn = sqlite3.connect(DB_NAME)
-    products_df = pd.read_sql_query("SELECT id, serial_no, name, category, sell_price, gst_percent FROM products", conn)
+    products_df = pd.read_sql_query("SELECT id, name, category, sell_price, gst_percent, stock FROM products WHERE stock > 0", conn)
     
     c_set = conn.cursor()
     c_set.execute("SELECT shop_title FROM shop_settings WHERE id=1")
     s_info = c_set.fetchone()
     current_shop_name = s_info[0] if s_info else "Raju Bhaiya Store"
-    conn.close()
 
     if not products_df.empty:
-        products_df["label"] = products_df.apply(lambda r: f"{r['name']} (S/N: {r['serial_no']})" if r['serial_no'] else r['name'], axis=1)
-        selected_prod_label = st.selectbox("जिस सामान का स्टिकर बनाना है चुनें:", products_df["label"].tolist())
-        target_prod = products_df[products_df["label"] == selected_prod_label].iloc[0]
+        selected_prod_name = st.selectbox("सामान चुनें:", products_df["name"].tolist())
+        target_prod = products_df[products_df["name"] == selected_prod_name].iloc[0]
+        p_id = int(target_prod["id"])
+        total_stock = int(target_prod["stock"])
 
-        base_sn = str(target_prod["serial_no"]).strip() if target_prod["serial_no"] else f"ITEM{target_prod['id']:04d}"
-        
+        units_df = pd.read_sql_query("SELECT id, serial_no FROM item_units WHERE product_id = ? AND status = 'IN_STOCK'", conn, params=(p_id,))
+        conn.close()
+
+        all_units_serials = units_df["serial_no"].tolist() if not units_df.empty else [f"SN-{p_id:04d}-{i+1:02d}" for i in range(total_stock)]
+
         col_st1, col_st2 = st.columns([1, 1])
         with col_st1:
-            print_action = st.radio(
-                "प्रिंट विकल्प चुनें:",
-                [
-                    "🆕 नए स्टिकर प्रिंट करें (1 से शुरू)",
-                    "🔄 खराब हुए स्टिकर दोबारा निकालें (Reprint Custom Range)",
-                    "🏷️ सभी स्टिकर पर एक जैसा कोड (Same Batch/SKU)"
-                ]
-            )
-            
-            generated_codes = []
-            
-            if print_action == "🆕 नए स्टिकर प्रिंट करें (1 से शुरू)":
-                copies = st.number_input("कितने स्टिकर प्रिंट करने हैं?", min_value=1, max_value=60, value=6)
-                for i in range(1, int(copies) + 1):
-                    generated_codes.append(f"{base_sn}-{i:02d}")
-                    
-            elif print_action == "🔄 खराब हुए स्टिकर दोबारा निकालें (Reprint Custom Range)":
-                st.warning("⚠️ जो स्टिकर खराब हुए हैं उनका नंबर रेंज चुनें:")
-                c_rn1, c_rn2 = st.columns(2)
-                start_num = c_rn1.number_input("कहाँ से (From S/N No.):", min_value=1, max_value=100, value=3)
-                end_num = c_rn2.number_input("कहाँ तक (To S/N No.):", min_value=int(start_num), max_value=100, value=5)
-                
-                for i in range(int(start_num), int(end_num) + 1):
-                    generated_codes.append(f"{base_sn}-{i:02d}")
-                copies = len(generated_codes)
-                
-            else:
-                copies = st.number_input("कितने स्टिकर प्रिंट करने हैं?", min_value=1, max_value=60, value=6)
-                generated_codes = [base_sn] * int(copies)
-
-            show_price = st.checkbox("स्टीकर पर बिक्री मूल्य (MRP) दिखाएं", value=True)
-            
-            if generated_codes:
-                st.info(f"💡 कुल प्रिंट होने वाले स्टिकर: **{len(generated_codes)}** (कोड: `{generated_codes[0]}` से `{generated_codes[-1]}`)")
+            print_mode = st.radio("प्रिंट विकल्प चुनें:", [f"🖨️ दुकान में मौजूद सभी {len(all_units_serials)} पीस प्रिंट करें", "🎯 केवल कुछ चुनिंदा पीस चुनें"])
+            selected_serials_to_print = all_units_serials if print_mode.startswith("🖨️ दुकान में मौजूद सभी") else st.multiselect("सीरियल नंबर चुनें:", all_units_serials, default=all_units_serials[:min(6, len(all_units_serials))])
+            show_price = st.checkbox("स्टीकर पर MRP दिखाएं", value=True)
+            st.success(f"✅ कुल प्रिंट होने वाले बारकोड: **{len(selected_serials_to_print)}** पीस")
 
         with col_st2:
-            st.markdown("#### 👁️ लाइव स्टिकर प्रीव्यू:")
-            sample_code = generated_codes[0] if generated_codes else base_sn
+            sample_code = selected_serials_to_print[0] if selected_serials_to_print else "SN-000000"
             price_display = f"<div style='font-size:15px; font-weight:bold; color:#000;'>MRP: ₹{target_prod['sell_price']:.2f}</div>" if show_price else ""
             
             preview_html = f"""
@@ -1605,19 +784,10 @@ elif mode == "🏷️ बारकोड स्टिकर प्रिंट�
                 <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
                 <style>
                     body {{ margin: 0; background: transparent; display: flex; justify-content: center; align-items: center; }}
-                    .tag-box {{
-                        border: 2px dashed #1E88E5;
-                        padding: 10px;
-                        width: 210px;
-                        text-align: center;
-                        font-family: Arial, sans-serif;
-                        background: #ffffff;
-                        border-radius: 8px;
-                    }}
+                    .tag-box {{ border: 2px dashed #1E88E5; padding: 10px; width: 210px; text-align: center; font-family: Arial, sans-serif; background: #ffffff; border-radius: 8px; }}
                     .shop-title {{ font-size: 11px; font-weight: bold; color: #1E88E5; text-transform: uppercase; margin-bottom: 2px; }}
                     .prod-title {{ font-size: 13px; font-weight: bold; color: #111; margin-bottom: 4px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }}
                     svg {{ max-width: 190px; height: 50px; }}
-                    .tax-info {{ font-size: 10px; color: #666; margin-top: 2px; }}
                 </style>
             </head>
             <body>
@@ -1626,17 +796,9 @@ elif mode == "🏷️ बारकोड स्टिकर प्रिंट�
                     <div class="prod-title">{target_prod['name']}</div>
                     <svg id="preview_barcode"></svg>
                     {price_display}
-                    <div class="tax-info">GST {target_prod['gst_percent']}% Incl.</div>
                 </div>
                 <script>
-                    JsBarcode("#preview_barcode", "{sample_code}", {{
-                        format: "CODE128",
-                        width: 2,
-                        height: 40,
-                        displayValue: true,
-                        fontSize: 13,
-                        margin: 0
-                    }});
+                    JsBarcode("#preview_barcode", "{sample_code}", {{ format: "CODE128", width: 2, height: 40, displayValue: true, fontSize: 13, margin: 0 }});
                 </script>
             </body>
             </html>
@@ -1644,10 +806,7 @@ elif mode == "🏷️ बारकोड स्टिकर प्रिंट�
             st.components.v1.html(preview_html, height=190)
 
         st.divider()
-        st.markdown(f"#### 🖨️ {len(generated_codes)} बारकोड स्टिकर प्रिंट शीट:")
-
-        tags_script_loop = "".join([f'JsBarcode("#barcode_{i}", "{code}", {{ format: "CODE128", width: 1.8, height: 38, displayValue: true, fontSize: 12, margin: 0 }});\n' for i, code in enumerate(generated_codes)])
-        
+        tags_script_loop = "".join([f'JsBarcode("#barcode_{i}", "{code}", {{ format: "CODE128", width: 1.8, height: 38, displayValue: true, fontSize: 12, margin: 0 }});\n' for i, code in enumerate(selected_serials_to_print)])
         tags_divs_loop = "".join([f"""
         <div style='border: 1px solid #000; padding: 6px; width: 180px; text-align: center; font-family: Arial, sans-serif; background: #fff; margin: 5px; display: inline-block; border-radius: 4px; page-break-inside: avoid;'>
             <div style='font-size: 10px; font-weight: bold; color: #1E88E5;'>{current_shop_name}</div>
@@ -1655,9 +814,7 @@ elif mode == "🏷️ बारकोड स्टिकर प्रिंट�
             <svg id='barcode_{i}' style='max-width: 165px; height: 45px;'></svg>
             {price_display}
         </div>
-        """ for i, _ in enumerate(generated_codes)])
-
-        btn_text = f"🖨️ केवल खराब हुए {len(generated_codes)} स्टिकर रीप्रिंट करें" if print_action == "🔄 खराब हुए स्टिकर दोबारा निकालें (Reprint Custom Range)" else f"🖨️ ये सभी {len(generated_codes)} स्टिकर प्रिंट करें"
+        """ for i, _ in enumerate(selected_serials_to_print)])
 
         print_sheet_script = f"""
         <!DOCTYPE html>
@@ -1666,7 +823,7 @@ elif mode == "🏷️ बारकोड स्टिकर प्रिंट�
             <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
         </head>
         <body style="margin:0; padding:0;">
-            <button onclick="printLabels()" style="background-color:#1E88E5; color:white; padding:12px 24px; font-size:16px; font-weight:bold; border:none; border-radius:6px; cursor:pointer; width:100%;">{btn_text}</button>
+            <button onclick="printLabels()" style="background-color:#1E88E5; color:white; padding:12px 24px; font-size:16px; font-weight:bold; border:none; border-radius:6px; cursor:pointer; width:100%;">🖨️ ये सभी {len(selected_serials_to_print)} अलग-अलग बारकोड स्टिकर प्रिंट करें</button>
             <script>
             function printLabels() {{
                 var win = window.open('', '', 'height=650,width=850');
@@ -1675,22 +832,11 @@ elif mode == "🏷️ बारकोड स्टिकर प्रिंट�
                     <head>
                         <title>Print Barcode Stickers</title>
                         <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"><\/script>
-                        <style>
-                            body {{ margin: 10px; font-family: Arial, sans-serif; }}
-                            .print-grid {{ display: flex; flex-wrap: wrap; justify-content: flex-start; }}
-                            @media print {{
-                                button {{ display: none; }}
-                            }}
-                        </style>
+                        <style> body {{ margin: 10px; font-family: Arial, sans-serif; }} .print-grid {{ display: flex; flex-wrap: wrap; justify-content: flex-start; }} @media print {{ button {{ display: none; }} }} </style>
                     </head>
                     <body>
-                        <div class="print-grid">
-                            {tags_divs_loop}
-                        </div>
-                        <script>
-                            {tags_script_loop}
-                            setTimeout(function() {{ window.print(); window.close(); }}, 500);
-                        <\/script>
+                        <div class="print-grid">{tags_divs_loop}</div>
+                        <script> {tags_script_loop} setTimeout(function() {{ window.print(); window.close(); }}, 500); <\/script>
                     </body>
                     </html>
                 `);
@@ -1703,4 +849,261 @@ elif mode == "🏷️ बारकोड स्टिकर प्रिंट�
         """
         st.components.v1.html(print_sheet_script, height=70)
     else:
+        conn.close()
         st.info("दुकान में कोई सामान नहीं है।")
+
+# ==========================================
+# 6. GSTR-1 टैक्स रिपोर्ट
+# ==========================================
+elif mode == "📄 GSTR-1 टैक्स रिपोर्ट":
+    st.subheader("📄 GSTR-1 एवं सरकारी टैक्स रिटर्न रिपोर्ट")
+    conn = sqlite3.connect(DB_NAME)
+    sales_df = pd.read_sql_query("SELECT * FROM sales", conn)
+    conn.close()
+
+    if not sales_df.empty:
+        sales_df["sale_date"] = pd.to_datetime(sales_df["sale_date"])
+        sales_df["month_str"] = sales_df["sale_date"].dt.strftime("%m-%Y")
+        all_months = sorted(sales_df["month_str"].unique().tolist(), reverse=True)
+        sel_gst_month = st.selectbox("📅 टैक्स फाइलिंग महीना चुनें:", all_months)
+        monthly_sales = sales_df[sales_df["month_str"] == sel_gst_month]
+
+        if not monthly_sales.empty:
+            gstr1_df = pd.DataFrame({
+                "Invoice Number": monthly_sales["bill_no"],
+                "Invoice Date": monthly_sales["sale_date"].dt.strftime("%d-%b-%Y"),
+                "Customer Name": monthly_sales["customer_name"],
+                "Item Description": monthly_sales["product_name"],
+                "Quantity": monthly_sales["quantity"],
+                "Taxable Value (Rs)": (monthly_sales["sell_price"] * monthly_sales["quantity"]).round(2),
+                "GST Rate (%)": monthly_sales["gst_percent"],
+                "Total GST (Rs)": monthly_sales["gst_amount"].round(2),
+                "Total Invoice Value (Rs)": monthly_sales["total_amount"].round(2)
+            })
+            st.dataframe(gstr1_df, use_container_width=True)
+            csv_data = gstr1_df.to_csv(index=False).encode('utf-8')
+            st.download_button(label="📥 GSTR-1 CSV डाउनलोड करें", data=csv_data, file_name=f"GSTR1_{sel_gst_month}.csv", mime="text/csv", type="primary")
+    else:
+        st.info("अभी कोई बिक्री रिकॉर्ड नहीं है।")
+
+# ==========================================
+# 7. नया स्टॉक जोड़ें (सही क्रम: नाम -> मात्रा -> अलग-अलग सीरियल -> दर)
+# ==========================================
+elif mode == "➕ नया स्टॉक / प्रोडक्ट जोड़ें":
+    st.subheader("➕ नया सामान स्टॉक एवं प्रत्येक पीस का सीरियल नंबर जोड़ें")
+    
+    with st.form("add_item_form", clear_on_submit=False):
+        st.markdown("#### 1. सामान एवं मात्रा विवरण")
+        c1, c2 = st.columns([3, 1])
+        name = c1.text_input("1. सामान का नाम (Item Name) *", placeholder="उदा. Fast Mobile Charger / 65W Data Cable")
+        stock_qty = c2.number_input("2. कितने पीस हैं? (Total Qty) *", min_value=1, max_value=200, value=10, step=1)
+        
+        st.markdown("---")
+        st.markdown(f"#### 2. इन सभी {stock_qty} पीसों के अलग-अलग सीरियल नंबर:")
+        
+        sn_mode = st.radio("सीरियल नंबर भरने का तरीका चुनें:", [
+            "🎲 सॉफ्टवेयर से सभी पीस के लिए यूनिक सीरियल ऑटो-जनरेट करें (Auto Gen Unique)",
+            "✍️ हाथ से टाइप करें या स्कैनर से एक-एक करके स्कैन करें (Custom Input per Piece)"
+        ], horizontal=True)
+
+        serial_numbers_list = []
+        
+        if sn_mode.startswith("🎲"):
+            rand_prefix = f"SN{random.randint(1000, 9999)}"
+            auto_serials = [f"{rand_prefix}-{i+1:03d}" for i in range(int(stock_qty))]
+            st.info(f"💡 जनरेट किए गए {stock_qty} यूनिक सीरियल कोड: `{auto_serials[0]}` ... से ... `{auto_serials[-1]}`")
+            serial_numbers_list = auto_serials
+        else:
+            st.caption(f"नीचे दिए गए बॉक्स में पूरे {stock_qty} सीरियल नंबर लिखें (हर लाइन में एक सीरियल नंबर):")
+            default_placeholder = "\n".join([f"SN-{random.randint(10000, 99999)}-{i+1:02d}" for i in range(int(stock_qty))])
+            sn_text_bulk = st.text_area("सीरियल नंबर लिस्ट (1 लाइन = 1 पीस):", value=default_placeholder, height=140)
+            serial_numbers_list = [line.strip() for line in sn_text_bulk.strip().split("\n") if line.strip()]
+
+        st.markdown("---")
+        st.markdown("#### 3. कीमत एवं टैक्स विवरण")
+        c3, c4, c5, c6 = st.columns(4)
+        buy_p = c3.number_input("3. खरीद लागत मूल्य प्रति पीस (₹) *", min_value=0.0, step=1.0)
+        sell_p = c4.number_input("4. निर्धारित बिक्री मूल्य प्रति पीस (₹) *", min_value=0.0, step=1.0)
+        gst_slab = c5.selectbox("GST दर (%) *", [0, 5, 12, 18, 28], index=3)
+        category = c6.text_input("कैटेगरी *", value="General")
+
+        desc = st.text_input("सामान का विवरण / वारंटी नोट", placeholder="उदा. 1 साल की गारंटी")
+        is_on = st.checkbox("🌐 इस सामान को ऑनलाइन डिजिटल कैटलॉग पर लाइव दिखाएं", value=True)
+
+        if st.form_submit_button("💾 नया स्टॉक और सभी यूनिक सीरियल नंबर सुरक्षित करें", type="primary", use_container_width=True):
+            if not name.strip():
+                st.warning("⚠️ कृपया सामान का नाम दर्ज करें!")
+            elif len(serial_numbers_list) != int(stock_qty):
+                st.error(f"⚠️ स्टॉक मात्रा {stock_qty} है, लेकिन आपने {len(serial_numbers_list)} सीरियल नंबर दर्ज किए हैं!")
+            else:
+                conn = sqlite3.connect(DB_NAME)
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                    INSERT INTO products (name, category, hsn_code, buy_price, sell_price, gst_percent, stock, min_alert, description, image_url, is_online)
+                    VALUES (?, ?, '8504', ?, ?, ?, ?, 3, ?, '', ?)
+                """, (name.strip(), category.strip(), buy_p, sell_p, float(gst_slab), int(stock_qty), desc.strip(), 1 if is_on else 0))
+                new_prod_id = cursor.lastrowid
+
+                for sn in serial_numbers_list:
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO item_units (product_id, serial_no, status)
+                        VALUES (?, ?, 'IN_STOCK')
+                    """, (new_prod_id, sn))
+
+                conn.commit()
+                conn.close()
+                st.success(f"🎉 '{name}' के सभी {stock_qty} पीस अलग-अलग यूनिक सीरियल नंबर के साथ सफलतापूर्वक स्टॉक में जुड़ गए!")
+
+# ==========================================
+# 8. स्टॉक व ऑनलाइन शो
+# ==========================================
+elif mode == "📦 स्टॉक व ऑनलाइन शो":
+    st.subheader("📦 दुकान का लाइव स्टॉक एवं यूनिट सीरियल लिस्टिंग")
+    conn = sqlite3.connect(DB_NAME)
+    df = pd.read_sql_query("SELECT id, name, category, buy_price, sell_price, gst_percent, stock FROM products", conn)
+    
+    st.markdown("#### 📋 प्रोडक्ट स्टॉक समरी")
+    st.dataframe(df.rename(columns={'name': 'सामान', 'category': 'कैटेगरी', 'buy_price': 'खरीद (₹)', 'sell_price': 'बिक्री (₹)', 'gst_percent': 'GST %', 'stock': 'उपलब्ध पीस'}), use_container_width=True)
+
+    st.markdown("#### 🔍 किसी प्रोडक्ट के सभी यूनिक पीस और सीरियल नंबर देखें:")
+    if not df.empty:
+        sel_p = st.selectbox("प्रोडक्ट चुनें:", df["name"].tolist())
+        target_id = df[df["name"] == sel_p].iloc[0]["id"]
+        units_df = pd.read_sql_query("SELECT id, serial_no, status, created_at FROM item_units WHERE product_id = ?", conn, params=(int(target_id),))
+        st.dataframe(units_df.rename(columns={'serial_no': 'यूनिक सीरियल नंबर / बारकोड', 'status': 'स्थिति (IN_STOCK / SOLD)', 'created_at': 'तारीख'}), use_container_width=True)
+    conn.close()
+
+# ==========================================
+# 9. उधारी/खाता अलर्ट
+# ==========================================
+elif mode == "📒 उधारी/खाता अलर्ट":
+    st.subheader("📒 ग्राहक उधारी रजिस्टर एवं WhatsApp पेमेंट रिमाइंडर")
+    conn = sqlite3.connect(DB_NAME)
+    udhar_df = pd.read_sql_query("SELECT id, bill_no, customer_name, customer_phone, total_amount, paid_amount, due_date, status FROM udhar_ledger WHERE status='PENDING'", conn)
+    
+    if not udhar_df.empty:
+        udhar_df["baki_amount"] = udhar_df["total_amount"] - udhar_df["paid_amount"]
+        for idx, row in udhar_df.iterrows():
+            c_u1, c_u2, c_u3, c_u4 = st.columns([3, 2, 2, 3])
+            c_u1.write(f"**{row['customer_name']}** ({row['customer_phone']})\n\nबिल: `{row['bill_no']}`")
+            c_u2.write(f"बकाया: **₹{row['baki_amount']:.2f}**")
+            c_u3.write(f"तारीख: **{row['due_date']}**")
+            
+            wa_text = f"नमस्ते {row['customer_name']} जी, आपकी बकाया उधारी ₹{row['baki_amount']:.2f} है। कृपया भुगतान करें।"
+            wa_url = f"https://wa.me/91{row['customer_phone']}?text={urllib.parse.quote(wa_text)}"
+            
+            with c_u4:
+                st.link_button("📲 WhatsApp तगादा भेजें", wa_url)
+                if st.button("💰 भुगतान मिला", key=f"pay_{row['id']}"):
+                    c = conn.cursor()
+                    c.execute("UPDATE udhar_ledger SET paid_amount = total_amount, status = 'PAID' WHERE id = ?", (int(row['id']),))
+                    conn.commit()
+                    st.success("खाता चुकता हुआ!")
+                    st.rerun()
+            st.divider()
+    else:
+        st.success("दुकान में किसी ग्राहक की कोई उधारी नहीं है।")
+    conn.close()
+
+# ==========================================
+# 10. ऑपरेटर बिक्री रिपोर्ट
+# ==========================================
+elif mode == "👔 ऑपरेटर बिक्री रिपोर्ट":
+    st.subheader("👔 ऑपरेटर बिक्री एवं परफॉरमेंस रिपोर्ट")
+    conn = sqlite3.connect(DB_NAME)
+    sales_df = pd.read_sql_query("SELECT * FROM sales", conn)
+    conn.close()
+
+    if not sales_df.empty:
+        st.dataframe(sales_df[["bill_no", "sale_date", "sold_by", "customer_name", "product_name", "serial_no", "total_amount", "profit"]], use_container_width=True)
+    else:
+        st.info("कोई बिक्री डेटा नहीं है।")
+
+# ==========================================
+# 11. ऑपरेटर मासिक कमीशन
+# ==========================================
+elif mode == "💵 ऑपरेटर मासिक कमीशन":
+    st.subheader("💵 ऑपरेटर मासिक कमीशन व पे-आउट रजिस्टर")
+    conn = sqlite3.connect(DB_NAME)
+    sales_df = pd.read_sql_query("SELECT * FROM sales WHERE sold_by != 'admin'", conn)
+    users_df = pd.read_sql_query("SELECT username, commission_percent FROM users WHERE role='operator'", conn)
+    conn.close()
+
+    if not users_df.empty and not sales_df.empty:
+        sel_op = st.selectbox("ऑपरेटर चुनें:", users_df["username"].tolist())
+        op_sales = sales_df[sales_df["sold_by"] == sel_op]
+        st.dataframe(op_sales[["bill_no", "product_name", "serial_no", "total_amount", "profit", "operator_commission"]], use_container_width=True)
+    else:
+        st.info("डेटा उपलब्ध नहीं है।")
+
+# ==========================================
+# 12. एडमिन डैशबोर्ड
+# ==========================================
+elif mode == "📊 एडमिन डैशबोर्ड":
+    st.markdown("<h2>📊 एंटरप्राइज बिज़नेस इंटेलिजेंस व एनालिटिक्स</h2>", unsafe_allow_html=True)
+    conn = sqlite3.connect(DB_NAME)
+    sales_df = pd.read_sql_query("SELECT * FROM sales", conn)
+    products_df = pd.read_sql_query("SELECT * FROM products", conn)
+    conn.close()
+
+    if not sales_df.empty:
+        k1, k2, k3 = st.columns(3)
+        k1.metric("कुल बिक्री", f"₹{sales_df['total_amount'].sum():.2f}")
+        k2.metric("कुल मुनाफ़ा", f"₹{sales_df['profit'].sum():.2f}")
+        k3.metric("कुल कटे बिल", f"{sales_df['bill_no'].nunique()} बिल")
+        
+        st.divider()
+        fig = px.bar(sales_df.groupby("product_name")["quantity"].sum().reset_index(), x="product_name", y="quantity", title="टॉप सेलिंग आइटम्स")
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("डैशबोर्ड डेटा देखने के लिए पहले बिलिंग करें।")
+
+# ==========================================
+# 13. ऑपरेटर मैनेजमेंट
+# ==========================================
+elif mode == "👥 ऑपरेटर मैनेजमेंट":
+    st.subheader("👥 ऑपरेटर मैनेजमेंट")
+    with st.form("add_user_form"):
+        u_name = st.text_input("यूज़रनेम:")
+        u_phone = st.text_input("मोबाइल नंबर:")
+        u_comm = st.number_input("कमीशन (%):", min_value=0.0, max_value=100.0, value=5.0)
+        u_pass = st.text_input("पासवर्ड:", type="password")
+        if st.form_submit_button("ऑपरेटर बनाएं"):
+            conn = sqlite3.connect(DB_NAME)
+            c = conn.cursor()
+            c.execute("INSERT INTO users (username, password, phone, commission_percent, role, permissions) VALUES (?, ?, ?, ?, 'operator', ?)", (u_name, u_pass, u_phone, u_comm, json.dumps(ALL_PERMISSIONS)))
+            conn.commit()
+            conn.close()
+            st.success(f"ऑपरेटर {u_name} बन गया!")
+
+# ==========================================
+# 14. स्टोर सेटिंग्स (फिक्स रेट लॉक स्विच सहित)
+# ==========================================
+elif mode == "🎨 स्टोर बैनर व सेटिंग्स":
+    st.subheader("🎨 ऑनलाइन स्टोर ब्रांडिंग, UPI एवं फिक्स रेट लॉक सेटिंग्स")
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT shop_title, shop_phone, upi_id, lock_operator_price FROM shop_settings WHERE id=1")
+    s_row = c.fetchone()
+    conn.close()
+
+    cur_lock = bool(s_row[3]) if s_row and s_row[3] is not None else True
+
+    with st.form("settings_form"):
+        s_title = st.text_input("दुकान का नाम:", value=s_row[0] if s_row else "Raju Bhaiya Store")
+        s_phone = st.text_input("मोबाइल नंबर:", value=s_row[1] if s_row else "8349596263")
+        s_upi = st.text_input("UPI ID:", value=s_row[2] if s_row else "8349596263@upi")
+        
+        st.markdown("---")
+        st.markdown("#### 🔒 ऑपरेटर सुरक्षा व मूल्य नियंत्रण:")
+        lock_switch = st.checkbox("🔒 ऑपरेटर के लिए फिक्स रेट लॉक करें (दर में कोई कमी या बदलाव नहीं कर सकेंगे)", value=cur_lock)
+
+        if st.form_submit_button("💾 सेटिंग्स सुरक्षित करें", type="primary", use_container_width=True):
+            conn = sqlite3.connect(DB_NAME)
+            c = conn.cursor()
+            c.execute("UPDATE shop_settings SET shop_title=?, shop_phone=?, upi_id=?, lock_operator_price=? WHERE id=1", (s_title, s_phone, s_upi, 1 if lock_switch else 0))
+            conn.commit()
+            conn.close()
+            st.success("✅ सेटिंग्स सफलतापूर्वक अपडेट हो गई!")
+            st.rerun()
