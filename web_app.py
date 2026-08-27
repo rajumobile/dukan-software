@@ -1,1109 +1,1780 @@
-import streamlit as st
+import os
 import sqlite3
-import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
-from datetime import datetime, timedelta, date
-import urllib.parse
-import base64
+import datetime
+import shutil
 import json
+import base64
 import random
+from flask import Flask, request, jsonify, render_template_string, send_file, Response
+from werkzeug.security import generate_password_hash, check_password_hash
 
-st.set_page_config(page_title="Raju Bhaiya Enterprise ERP & POS", page_icon="🏢", layout="wide")
-
+app = Flask(__name__)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "raju_pos_enterprise_prod_secure_2026_jwt_token")
 DB_NAME = "shop.db"
+BACKUP_DIR = "backups"
 
-ALL_PERMISSIONS = [
-    "🛍️ ऑनलाइन स्टोर देखें",
-    "⚡ सुपरफास्ट POS बिलिंग",
-    "🔄 सेल्स रिटर्न व रिफंड",
-    "🏷️ बारकोड स्टिकर प्रिंटर",
-    "📄 GSTR-1 टैक्स रिपोर्ट",
-    "➕ नया स्टॉक / प्रोडक्ट जोड़ें",
-    "📦 स्टॉक व ऑनलाइन शो",
-    "📒 उधारी/खाता अलर्ट",
-    "👔 ऑपरेटर बिक्री रिपोर्ट",
-    "💵 ऑपरेटर मासिक कमीशन",
-    "📊 एडमिन डैशबोर्ड",
-    "👥 ऑपरेटर मैनेजमेंट",
-    "🎨 स्टोर बैनर व सेटिंग्स"
-]
+if not os.path.exists(BACKUP_DIR):
+    os.makedirs(BACKUP_DIR)
 
-# --- डेटाबेस ऑटो-सेटअप ---
-def init_db():
+def get_db():
     conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def trigger_auto_backup():
+    """मॉड्यूल 11: 30-दिवसीय ऑटो-रोलिंग व रियल-टाइम बैकअप"""
+    try:
+        if os.path.exists(DB_NAME):
+            today_str = datetime.datetime.now().strftime("%Y_%m_%d")
+            daily_backup = os.path.join(BACKUP_DIR, f"backup_{today_str}.db")
+            shutil.copyfile(DB_NAME, daily_backup)
+            now = datetime.datetime.now()
+            for f in os.listdir(BACKUP_DIR):
+                f_path = os.path.join(BACKUP_DIR, f)
+                if os.path.isfile(f_path) and f.startswith("backup_"):
+                    c_time = datetime.datetime.fromtimestamp(os.path.getctime(f_path))
+                    if (now - c_time).days > 30:
+                        os.remove(f_path)
+    except Exception as e:
+        print(f"Auto Backup Exception: {e}")
+
+def init_db():
+    conn = get_db()
     c = conn.cursor()
     
-    # 1. टेबल्स बनाना
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE,
-            password TEXT,
-            phone TEXT DEFAULT '',
-            commission_percent REAL DEFAULT 0,
-            role TEXT,
-            permissions TEXT DEFAULT '["🛍️ ऑनलाइन स्टोर देखें", "⚡ सुपरफास्ट POS बिलिंग", "📦 स्टॉक व ऑनलाइन शो"]'
-        )
-    """)
-    
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS shop_settings (
-            id INTEGER PRIMARY KEY,
-            shop_title TEXT DEFAULT 'Raju Bhaiya Online Store',
-            shop_subtitle TEXT DEFAULT 'डिजिटल प्रोडक्ट कैटलॉग एवं ऑनलाइन ऑर्डर',
-            shop_phone TEXT DEFAULT '8349596263',
-            shop_gstin TEXT DEFAULT '',
-            upi_id TEXT DEFAULT '8349596263@upi',
-            lock_operator_price INTEGER DEFAULT 1,
-            banner_image TEXT DEFAULT ''
-        )
-    """)
+    c.execute('''CREATE TABLE IF NOT EXISTS settings (
+        id INTEGER PRIMARY KEY,
+        shop_name TEXT DEFAULT 'Raju Bhaiya Studio & Mobile Kendra',
+        tagline TEXT DEFAULT 'डिजिटल फोटोग्राफी, मोबाइल रिपेयरिंग एवं एक्सेसरीज़',
+        address TEXT DEFAULT 'Chanda Marriage Garden Ke Pass, Chhatarpur',
+        phone TEXT DEFAULT '8349596263',
+        gstin TEXT DEFAULT '23AAAFR8349M1Z2',
+        upi_id TEXT DEFAULT '8349596263@upi'
+    )''')
+    c.execute('SELECT COUNT(*) FROM settings')
+    if c.fetchone()[0] == 0:
+        c.execute('''INSERT INTO settings (id, shop_name, tagline, address, phone, gstin, upi_id)
+                     VALUES (1, 'Raju Bhaiya Studio & Mobile Kendra', 'डिजिटल फोटोग्राफी, मोबाइल रिपेयरिंग एवं एक्सेसरीज़', 'Chanda Marriage Garden Ke Pass, Chhatarpur', '8349596263', '23AAAFR8349M1Z2', '8349596263@upi')''')
 
-    # पुराने डेटाबेस में नए कॉलम्स ऑटो-अपग्रेड (INSERT से पहले जोड़ना जरूरी है)
-    def add_col(tbl, col, typ):
-        try:
-            c.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {typ}")
-        except sqlite3.OperationalError:
-            pass
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE,
+        password TEXT,
+        full_name TEXT,
+        phone TEXT,
+        role TEXT DEFAULT 'Operator',
+        commission_percent REAL DEFAULT 5.0,
+        can_view_profit INTEGER DEFAULT 0,
+        can_edit_stock INTEGER DEFAULT 0,
+        can_give_discount INTEGER DEFAULT 0,
+        can_view_reports INTEGER DEFAULT 0,
+        is_active INTEGER DEFAULT 1
+    )''')
+    c.execute('SELECT COUNT(*) FROM users')
+    if c.fetchone()[0] == 0:
+        admin_hashed = generate_password_hash("admin123")
+        c.execute('''INSERT INTO users (username, password, full_name, phone, role, commission_percent, can_view_profit, can_edit_stock, can_give_discount, can_view_reports)
+                     VALUES ('admin', ?, 'Raju Kushwaha (Master Admin)', '8349596263', 'Admin', 0, 1, 1, 1, 1)''', (admin_hashed,))
 
-    add_col("shop_settings", "lock_operator_price", "INTEGER DEFAULT 1")
-    add_col("shop_settings", "shop_gstin", "TEXT DEFAULT ''")
-    add_col("shop_settings", "upi_id", "TEXT DEFAULT '8349596263@upi'")
-    add_col("shop_settings", "shop_phone", "TEXT DEFAULT '8349596263'")
+    c.execute('''CREATE TABLE IF NOT EXISTS products (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT,
+        brand TEXT,
+        category TEXT DEFAULT 'General',
+        packaging_type TEXT DEFAULT 'Loose',
+        purchase_cost REAL DEFAULT 0,
+        retail_price REAL DEFAULT 0,
+        min_stock_alert INTEGER DEFAULT 2,
+        image_data TEXT DEFAULT '',
+        is_online INTEGER DEFAULT 1
+    )''')
 
-    c.execute("INSERT OR IGNORE INTO shop_settings (id, shop_title, shop_subtitle, shop_phone, shop_gstin, upi_id, lock_operator_price, banner_image) VALUES (1, 'Raju Bhaiya Online Store', 'डिजिटल प्रोडक्ट कैटलॉग एवं ऑनलाइन ऑर्डर', '8349596263', '', '8349596263@upi', 1, '')")
+    c.execute('''CREATE TABLE IF NOT EXISTS product_units (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        product_id INTEGER,
+        serial_no TEXT UNIQUE,
+        status TEXT DEFAULT 'IN_STOCK',
+        FOREIGN KEY(product_id) REFERENCES products(id)
+    )''')
 
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS products (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            category TEXT DEFAULT 'General',
-            hsn_code TEXT DEFAULT '8504',
-            buy_price REAL NOT NULL,
-            sell_price REAL NOT NULL,
-            gst_percent REAL DEFAULT 0,
-            stock INTEGER NOT NULL,
-            min_alert INTEGER DEFAULT 3,
-            description TEXT DEFAULT '',
-            image_url TEXT DEFAULT '',
-            is_online INTEGER DEFAULT 1
-        )
-    """)
-    
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS item_units (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            product_id INTEGER,
-            serial_no TEXT UNIQUE,
-            status TEXT DEFAULT 'IN_STOCK',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS sales (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            bill_no TEXT,
-            product_id INTEGER,
-            serial_no TEXT DEFAULT '',
-            product_name TEXT NOT NULL,
-            quantity INTEGER NOT NULL,
-            sell_price REAL NOT NULL,
-            gst_percent REAL DEFAULT 0,
-            gst_amount REAL DEFAULT 0,
-            total_amount REAL NOT NULL,
-            profit REAL NOT NULL,
-            operator_commission REAL DEFAULT 0,
-            sold_by TEXT,
-            customer_name TEXT,
-            customer_phone TEXT,
-            payment_mode TEXT,
-            due_date TEXT,
-            sale_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS sales_returns (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            bill_no TEXT,
-            product_id INTEGER,
-            product_name TEXT,
-            returned_qty INTEGER,
-            refund_amount REAL,
-            return_reason TEXT,
-            returned_by TEXT,
-            return_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS udhar_ledger (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            bill_no TEXT,
-            customer_name TEXT NOT NULL,
-            customer_phone TEXT,
-            total_amount REAL NOT NULL,
-            paid_amount REAL DEFAULT 0,
-            due_date TEXT,
-            status TEXT DEFAULT 'PENDING',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
+    c.execute('''CREATE TABLE IF NOT EXISTS sales (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        invoice_no TEXT UNIQUE,
+        customer_name TEXT,
+        customer_phone TEXT,
+        subtotal REAL,
+        discount REAL,
+        total_amount REAL,
+        profit_amount REAL,
+        payment_mode TEXT,
+        cash_paid REAL DEFAULT 0,
+        upi_paid REAL DEFAULT 0,
+        udhar_amount REAL DEFAULT 0,
+        sold_by_name TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )''')
 
-    add_col("products", "hsn_code", "TEXT DEFAULT '8504'")
-    add_col("sales", "serial_no", "TEXT DEFAULT ''")
-    add_col("users", "phone", "TEXT DEFAULT ''")
-    add_col("users", "commission_percent", "REAL DEFAULT 0")
-    add_col("users", "permissions", "TEXT DEFAULT '[]'")
-    add_col("sales", "operator_commission", "REAL DEFAULT 0")
-    add_col("products", "gst_percent", "REAL DEFAULT 0")
-    add_col("products", "category", "TEXT DEFAULT 'General'")
-    add_col("products", "description", "TEXT DEFAULT ''")
-    add_col("products", "image_url", "TEXT DEFAULT ''")
-    add_col("products", "is_online", "INTEGER DEFAULT 1")
-    add_col("sales", "gst_percent", "REAL DEFAULT 0")
-    add_col("sales", "gst_amount", "REAL DEFAULT 0")
-    add_col("sales", "bill_no", "TEXT")
-    add_col("sales", "sold_by", "TEXT")
-    add_col("sales", "customer_name", "TEXT")
-    add_col("sales", "customer_phone", "TEXT")
-    add_col("sales", "payment_mode", "TEXT")
-    add_col("sales", "due_date", "TEXT")
+    c.execute('''CREATE TABLE IF NOT EXISTS sale_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sale_id INTEGER,
+        item_type TEXT,
+        product_id INTEGER,
+        unit_id INTEGER,
+        item_name TEXT,
+        serial_no TEXT,
+        cost_price REAL,
+        sell_price REAL,
+        qty INTEGER DEFAULT 1,
+        FOREIGN KEY(sale_id) REFERENCES sales(id)
+    )''')
 
-    admin_perms = json.dumps(ALL_PERMISSIONS)
-    default_op_perms = json.dumps(["🛍️ ऑनलाइन स्टोर देखें", "⚡ सुपरफास्ट POS बिलिंग", "📦 स्टॉक व ऑनलाइन शो", "📒 उधारी/खाता अलर्ट"])
+    c.execute('''CREATE TABLE IF NOT EXISTS repair_jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_no TEXT UNIQUE,
+        customer_name TEXT,
+        customer_phone TEXT,
+        brand_model TEXT,
+        pattern_pin TEXT,
+        fault_description TEXT,
+        estimated_cost REAL DEFAULT 0,
+        advance_paid REAL DEFAULT 0,
+        remaining_balance REAL DEFAULT 0,
+        checklist_data TEXT,
+        status TEXT DEFAULT 'RECEIVED',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )''')
 
-    c.execute("INSERT OR IGNORE INTO users (username, password, phone, commission_percent, role, permissions) VALUES ('admin', 'admin123', '8349596263', 0, 'admin', ?)", (admin_perms,))
-    c.execute("INSERT OR IGNORE INTO users (username, password, phone, commission_percent, role, permissions) VALUES ('operator', 'op123', '', 5.0, 'operator', ?)", (default_op_perms,))
+    c.execute('''CREATE TABLE IF NOT EXISTS customer_udhar (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        customer_name TEXT,
+        customer_phone TEXT UNIQUE,
+        total_udhar REAL DEFAULT 0,
+        paid_amount REAL DEFAULT 0,
+        due_amount REAL DEFAULT 0,
+        last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
+    )''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS returns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        invoice_no TEXT,
+        item_name TEXT,
+        refund_amount REAL,
+        reason TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS expenses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        category TEXT,
+        amount REAL,
+        description TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )''')
 
     conn.commit()
     conn.close()
 
 init_db()
 
-# --- सेशन्स ---
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-    st.session_state.role = ""
-    st.session_state.username = ""
-    st.session_state.permissions = []
-if "billing_cart" not in st.session_state:
-    st.session_state.billing_cart = []
-if "online_cart" not in st.session_state:
-    st.session_state.online_cart = []
-if "last_bill" not in st.session_state:
-    st.session_state.last_bill = None
-if "reset_stage" not in st.session_state:
-    st.session_state.reset_stage = "enter_user"
-if "generated_otp" not in st.session_state:
-    st.session_state.generated_otp = None
-if "reset_target_user" not in st.session_state:
-    st.session_state.reset_target_user = None
+MASTER_HTML = """
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ settings.shop_name }} - ERP Master Pro 2026</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://unpkg.com/html5-qrcode"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
+    <style>
+        @media print {
+            body * { visibility: hidden; }
+            #printableArea, #printableArea * { visibility: visible; }
+            #printableArea { position: absolute; left: 0; top: 0; width: 100%; display: block !important; }
+        }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-100 font-sans min-h-screen">
 
-# --- साइडबार नेविगेशन ---
-st.sidebar.markdown("## 🏢 व्यापार ERP पोर्टल")
-
-if not st.session_state.logged_in:
-    mode = st.sidebar.radio("मोड चुनें:", ["🛍️ ऑनलाइन स्टोर (Customer View)", "🔐 स्टाफ लॉगिन"])
-else:
-    st.sidebar.markdown(f"**लॉगिन:** `{st.session_state.username.upper()}` ({st.session_state.role.upper()})")
-    if st.sidebar.button("🚪 लॉगआउट", use_container_width=True):
-        st.session_state.logged_in = False
-        st.session_state.billing_cart = []
-        st.session_state.last_bill = None
-        st.session_state.permissions = []
-        st.rerun()
-    
-    if st.session_state.role == "admin":
-        user_menu = ALL_PERMISSIONS
-    else:
-        user_menu = [p for p in st.session_state.permissions if p in ALL_PERMISSIONS]
-        if "🛍️ ऑनलाइन स्टोर देखें" not in user_menu:
-            user_menu.insert(0, "🛍️ ऑनलाइन स्टोर देखें")
-        if not user_menu:
-            user_menu = ["🛍️ ऑनलाइन स्टोर देखें", "⚡ सुपरफास्ट POS बिलिंग"]
-    
-    mode = st.sidebar.radio("मेन्यू चुनें:", user_menu)
-
-# ==========================================
-# 1. पब्लिक ऑनलाइन स्टोर
-# ==========================================
-if mode in ["🛍️ ऑनलाइन स्टोर (Customer View)", "🛍️ ऑनलाइन स्टोर देखें"]:
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT shop_title, shop_subtitle, shop_phone, banner_image FROM shop_settings WHERE id=1")
-    settings = c.fetchone()
-    
-    shop_title = settings[0] if settings else "Raju Bhaiya Online Store"
-    shop_subtitle = settings[1] if settings else "डिजिटल प्रोडक्ट कैटलॉग एवं ऑनलाइन ऑर्डर"
-    shop_phone = settings[2] if settings and settings[2] else "8349596263"
-    banner_img = settings[3] if settings else ""
-    
-    online_prods = pd.read_sql_query("SELECT id, name, category, sell_price, gst_percent, stock, description, image_url FROM products WHERE is_online=1 AND stock > 0", conn)
-    conn.close()
-
-    h_col1, h_col2 = st.columns([1, 4])
-    with h_col1:
-        if banner_img and len(str(banner_img).strip()) > 5:
-            st.image(banner_img, width=120)
-        else:
-            st.markdown("<div style='font-size: 70px; text-align: center;'>🏬</div>", unsafe_allow_html=True)
-    with h_col2:
-        st.markdown(f"<h1 style='margin-bottom:0px; color:#1E88E5;'>{shop_title}</h1>", unsafe_allow_html=True)
-        st.markdown(f"<h4 style='margin-top:2px; margin-bottom:5px; color:#2e7d32;'>📞 संपर्क सूत्र: +91 {shop_phone}</h4>", unsafe_allow_html=True)
-        st.markdown(f"<p style='font-size:15px; color:#555;'>{shop_subtitle}</p>", unsafe_allow_html=True)
-
-    st.divider()
-
-    col_s1, col_s2 = st.columns([3, 1])
-    search_query = col_s1.text_input("🔍 सामान खोजें", placeholder="सामान का नाम लिखें...")
-    
-    categories = ["सभी (All)"] + (online_prods["category"].dropna().unique().tolist() if not online_prods.empty else [])
-    selected_cat = col_s2.selectbox("कैटेगरी फ़िल्टर", categories)
-
-    filtered_prods = online_prods.copy()
-    if not filtered_prods.empty:
-        if search_query.strip():
-            filtered_prods = filtered_prods[filtered_prods["name"].str.contains(search_query, case=False, na=False)]
-        if selected_cat != "सभी (All)":
-            filtered_prods = filtered_prods[filtered_prods["category"] == selected_cat]
-
-    st.divider()
-
-    if not filtered_prods.empty:
-        grid_cols = st.columns(3)
-        for i, row in filtered_prods.reset_index().iterrows():
-            with grid_cols[i % 3]:
-                with st.container(border=True):
-                    if row["image_url"] and len(str(row["image_url"]).strip()) > 5:
-                        st.image(row["image_url"], use_container_width=True)
-                    else:
-                        st.markdown("📦 **[फोटो उपलब्ध नहीं]**")
-                    
-                    st.subheader(row["name"])
-                    st.markdown(f"**कीमत:** <span style='font-size:18px; color:green;'>₹{row['sell_price']:.2f}</span> <small>(GST {row['gst_percent']}%)</small>", unsafe_allow_html=True)
-                    if row["description"]:
-                        st.caption(row["description"])
-                    st.write(f"उपलब्ध: `{row['stock']}` पीस")
-
-                    if st.button(f"🛒 कार्ट में जोड़ें", key=f"add_online_{row['id']}", use_container_width=True):
-                        st.session_state.online_cart.append({
-                            "id": int(row["id"]),
-                            "name": row["name"],
-                            "price": float(row["sell_price"])
-                        })
-                        st.success(f"{row['name']} जोड़ा गया!")
-                        st.rerun()
-    else:
-        st.info("फिलहाल ऑनलाइन स्टोर में कोई प्रोडक्ट उपलब्ध नहीं है।")
-
-    if st.session_state.online_cart:
-        st.divider()
-        st.subheader("🛒 आपका ऑनलाइन कार्ट (Your Order)")
-        
-        cart_summary = pd.DataFrame(st.session_state.online_cart).groupby(["id", "name", "price"]).size().reset_index(name="qty")
-        cart_summary["total"] = cart_summary["price"] * cart_summary["qty"]
-        
-        st.dataframe(cart_summary[["name", "qty", "price", "total"]].rename(columns={"name": "सामान", "qty": "मात्रा", "price": "दर (₹)", "total": "कुल (₹)"}), use_container_width=True)
-        
-        grand_total = cart_summary["total"].sum()
-        st.markdown(f"### कुल ऑर्डर राशि: **₹{grand_total:.2f}**")
-
-        c_o1, c_o2 = st.columns(2)
-        cust_cname = c_o1.text_input("आपका नाम (Customer Name)", placeholder="उदा. रमेश कुमार")
-        cust_cphone = c_o2.text_input("आपका व्हाट्सएप नंबर (Mobile No.)", placeholder="उदा. 98XXXXXXXX")
-        cust_caddr = st.text_area("डिलीवरी का पता / नोट (Delivery Address)", placeholder="गाँव/शहर, पिनकोड...")
-
-        order_lines = [f"- {r['name']} x {r['qty']} = Rs {r['total']:.2f}" for _, r in cart_summary.iterrows()]
-        order_text = (
-            f"नमस्ते, मुझे *{shop_title}* से यह सामान ऑर्डर करना है:\n\n"
-            f"*ऑर्डर विवरण:*\n" + "\n".join(order_lines) +
-            f"\n\n*कुल राशि:* Rs {grand_total:.2f}\n"
-            f"*ग्राहक का नाम:* {cust_cname}\n"
-            f"*मोबाइल:* {cust_cphone}\n"
-            f"*पता:* {cust_caddr}"
-        )
-        
-        wa_url = f"https://wa.me/91{shop_phone}?text={urllib.parse.quote(order_text)}"
-
-        c_wa1, c_wa2 = st.columns([2, 1])
-        with c_wa1:
-            st.link_button("📲 सीधे व्हाट्सएप पर ऑर्डर भेजें (Send Order on WhatsApp)", wa_url, type="primary", use_container_width=True)
-        with c_wa2:
-            if st.button("❌ कार्ट खाली करें", use_container_width=True):
-                st.session_state.online_cart = []
-                st.rerun()
-
-# ==========================================
-# 2. स्टाफ लॉगिन स्क्रीन
-# ==========================================
-elif mode == "🔐 स्टाफ लॉगिन":
-    login_tab, forgot_tab = st.tabs(["🔑 लॉगिन करें", "🔄 पासवर्ड भूल गए? (Forgot Password)"])
-    
-    with login_tab:
-        st.subheader("🔐 दुकान स्टाफ एवं एडमिन लॉगिन")
-        col1, col2 = st.columns([1, 2])
-        with col1:
-            u = st.text_input("यूज़रनेम (Username)", key="main_username")
-            p = st.text_input("पासवर्ड (Password)", type="password", key="main_password")
-            if st.button("लॉगिन करें", use_container_width=True):
-                conn = sqlite3.connect(DB_NAME)
-                cursor = conn.cursor()
-                cursor.execute("SELECT role, permissions FROM users WHERE username=? AND password=?", (u.strip(), p.strip()))
-                user = cursor.fetchone()
-                conn.close()
-                if user:
-                    st.session_state.logged_in = True
-                    st.session_state.username = u.strip()
-                    st.session_state.role = user[0]
-                    try:
-                        st.session_state.permissions = json.loads(user[1]) if user[1] else []
-                    except:
-                        st.session_state.permissions = []
-                    st.rerun()
-                else:
-                    st.error("❌ गलत यूज़रनेम या पासवर्ड!")
-
-    with forgot_tab:
-        st.subheader("📱 मोबाइल OTP द्वारा पासवर्ड रीसेट")
-        col_f1, _ = st.columns([1, 1])
-        with col_f1:
-            if st.session_state.reset_stage == "enter_user":
-                target_u = st.text_input("अपना यूज़रनेम या रजिस्टर्ड मोबाइल नंबर दर्ज करें:")
-                if st.button("📩 OTP भेजें", use_container_width=True):
-                    if target_u.strip():
-                        conn = sqlite3.connect(DB_NAME)
-                        cursor = conn.cursor()
-                        cursor.execute("SELECT username, phone FROM users WHERE username=? OR phone=?", (target_u.strip(), target_u.strip()))
-                        matched_user = cursor.fetchone()
-                        conn.close()
-                        
-                        if matched_user:
-                            if not matched_user[1]:
-                                st.error("⚠️ इस आईडी के साथ कोई मोबाइल नंबर लिंक नहीं है। कृपया एडमिन से रीसेट करवाएं!")
-                            else:
-                                gen_otp = str(random.randint(100000, 999999))
-                                st.session_state.generated_otp = gen_otp
-                                st.session_state.reset_target_user = matched_user[0]
-                                st.session_state.reset_target_phone = matched_user[1]
-                                st.session_state.reset_stage = "verify_otp"
-                                st.rerun()
-                        else:
-                            st.error("⚠️ यह यूज़रनेम या मोबाइल नंबर नहीं मिला!")
-                    else:
-                        st.warning("कृपया यूज़रनेम दर्ज करें!")
-
-            elif st.session_state.reset_stage == "verify_otp":
-                st.info("📲 मोबाइल नंबर के लिए 6-अंकों का OTP कोड:")
-                st.success(f"🔐 आपका सुरक्षा OTP कोड: **{st.session_state.generated_otp}**")
-                
-                wa_otp_text = f"दुकान सॉफ्टवेयर पासवर्ड रीसेट OTP कोड: {st.session_state.generated_otp}"
-                wa_otp_link = f"https://wa.me/91{st.session_state.reset_target_phone}?text={urllib.parse.quote(wa_otp_text)}"
-                st.link_button("💬 व्हाट्सएप पर OTP कोड खोलें", wa_otp_link)
-                
-                entered_otp = st.text_input("6-अंकों का OTP दर्ज करें:", max_chars=6)
-                new_pass = st.text_input("नया पासवर्ड (New Password):", type="password")
-                
-                c_ot1, c_ot2 = st.columns(2)
-                with c_ot1:
-                    if st.button("✅ पासवर्ड बदलें", type="primary", use_container_width=True):
-                        if entered_otp.strip() == str(st.session_state.generated_otp):
-                            if len(new_pass.strip()) >= 4:
-                                conn = sqlite3.connect(DB_NAME)
-                                cursor = conn.cursor()
-                                cursor.execute("UPDATE users SET password=? WHERE username=?", (new_pass.strip(), st.session_state.reset_target_user))
-                                conn.commit()
-                                conn.close()
-                                
-                                st.success("🎉 पासवर्ड बदल गया! अब लॉगिन करें।")
-                                st.session_state.reset_stage = "enter_user"
-                                st.session_state.generated_otp = None
-                                st.session_state.reset_target_user = None
-                            else:
-                                st.error("पासवर्ड कम से कम 4 अक्षरों का होना चाहिए!")
-                        else:
-                            st.error("❌ गलत OTP दर्ज किया गया है!")
-                
-                with c_ot2:
-                    if st.button("रद्द करें (Cancel)", use_container_width=True):
-                        st.session_state.reset_stage = "enter_user"
-                        st.session_state.generated_otp = None
-                        st.rerun()
-
-# ==========================================
-# 3. सुपरफास्ट POS बारकोड बिलिंग (घाटा अलर्ट व फिक्स रेट लॉक सहित)
-# ==========================================
-elif mode in ["⚡ सुपरफास्ट POS बिलिंग", "💰 मल्टी-आइटम बिलिंग"]:
-    st.subheader("⚡ सुपरफास्ट POS बारकोड बिलिंग काउंटर")
-    
-    conn = sqlite3.connect(DB_NAME)
-    prods = pd.read_sql_query("SELECT id, name, sell_price, gst_percent, stock, buy_price FROM products WHERE stock > 0", conn)
-    
-    c_set = conn.cursor()
-    c_set.execute("SELECT shop_title, shop_phone, upi_id, shop_gstin, lock_operator_price FROM shop_settings WHERE id=1")
-    s_info = c_set.fetchone()
-    current_shop_name = s_info[0] if s_info else "Raju Bhaiya Store"
-    current_shop_phone = s_info[1] if s_info and s_info[1] else "8349596263"
-    current_upi_id = s_info[2] if s_info and s_info[2] else "8349596263@upi"
-    current_gstin = s_info[3] if s_info and s_info[3] else ""
-    is_price_locked = bool(s_info[4]) if s_info and s_info[4] is not None else True
-
-    c_comm = conn.cursor()
-    c_comm.execute("SELECT commission_percent FROM users WHERE username=?", (st.session_state.username,))
-    row_comm = c_comm.fetchone()
-    op_comm_rate = float(row_comm[0]) if row_comm and row_comm[0] else 0.0
-    conn.close()
-
-    col_c1, col_c2 = st.columns(2)
-    cust_name = col_c1.text_input("ग्राहक का नाम", value="नकद ग्राहक")
-    cust_phone = col_c2.text_input("ग्राहक का मोबाइल नंबर", value="")
-
-    st.markdown("---")
-    
-    st.markdown("#### ⚡ 1. बारकोड स्कैनर से तुरंत जोड़ें (Scan Barcode & Enter)")
-    with st.form("barcode_scan_form", clear_on_submit=True):
-        sc_col1, sc_col2 = st.columns([3, 1])
-        scanned_code = sc_col1.text_input("⚡ बारकोड / सीरियल नंबर स्कैन करें:", placeholder="बारकोड स्कैनर बीप करें या टाइप करें...")
-        scan_submit = sc_col2.form_submit_button("⚡ स्कैन कर बिल में जोड़ें", use_container_width=True)
-
-        if scan_submit and scanned_code.strip():
-            conn = sqlite3.connect(DB_NAME)
-            c = conn.cursor()
-            c.execute("""
-                SELECT u.id, u.product_id, u.serial_no, p.name, p.sell_price, p.buy_price, p.gst_percent, p.stock
-                FROM item_units u
-                JOIN products p ON u.product_id = p.id
-                WHERE u.serial_no = ? AND u.status = 'IN_STOCK'
-            """, (scanned_code.strip(),))
-            matched_unit = c.fetchone()
-            conn.close()
-
-            if matched_unit:
-                unit_id, p_id, s_no, p_name, s_price, b_price, gst_p, p_stock = matched_unit
-                already_scanned_serials = [it["serial_no"] for it in st.session_state.billing_cart]
-                
-                if s_no in already_scanned_serials:
-                    st.warning(f"⚠️ यह पीस (S/N: {s_no}) पहले से बिल में जुड़ा हुआ है!")
-                else:
-                    base_rate = float(s_price)
-                    gst_amt = (base_rate * float(gst_p)) / 100.0
-                    net_item_profit = base_rate - float(b_price)
-                    calc_commission = (net_item_profit * op_comm_rate) / 100.0 if net_item_profit > 0 else 0.0
-
-                    st.session_state.billing_cart.append({
-                        "unit_id": int(unit_id),
-                        "id": int(p_id),
-                        "serial_no": str(s_no),
-                        "name": str(p_name),
-                        "qty": 1,
-                        "rate": base_rate,
-                        "buy_price": float(b_price),
-                        "gst_percent": float(gst_p),
-                        "gst_amount": float(gst_amt),
-                        "total": base_rate + gst_amt,
-                        "profit": net_item_profit,
-                        "commission": calc_commission
-                    })
-                    st.success(f"⚡ '{p_name}' (S/N: {s_no}) बिल में जुड़ गया!")
-                    st.rerun()
-            else:
-                st.error(f"❌ '{scanned_code}' सीरियल नंबर उपलब्ध नहीं है या पहले ही बिक चुका है!")
-
-    st.markdown("#### 🛒 2. या मेन्यू से सामान चुनें (Manual Select)")
-    if not prods.empty:
-        selected_prod = st.selectbox("सामान चुनें", prods["name"].tolist())
-        item_data = prods[prods["name"] == selected_prod].iloc[0]
-
-        already_in_cart = sum(item["qty"] for item in st.session_state.billing_cart if item["id"] == int(item_data["id"]))
-        avail_stock = int(item_data["stock"]) - already_in_cart
-
-        col1, col2, col3, col4 = st.columns([1, 2, 1, 2])
-        max_allowed = max(1, avail_stock)
-        qty = col1.number_input("मात्रा", min_value=1, max_value=max_allowed, value=1, disabled=(avail_stock <= 0))
-        
-        # ऑपरेटर के लिए लॉक स्थिति चेक
-        rate_disabled = is_price_locked and (st.session_state.role != "admin")
-        rate = col2.number_input("बिक्री दर (₹)", min_value=0.0, value=float(item_data["sell_price"]), disabled=rate_disabled)
-        gst_p = col3.number_input("GST %", min_value=0.0, value=float(item_data["gst_percent"]), step=1.0)
-        
-        # ⚠️ घाटा (Loss) और कम दर अलर्ट नोटिफिकेशन
-        fixed_price = float(item_data["sell_price"])
-        cost_price = float(item_data["buy_price"])
-        
-        if rate < cost_price:
-            per_piece_loss = cost_price - rate
-            st.error(f"🚨 **चेतावनी (Loss Alert):** यह सामान खरीद मूल्य (₹{cost_price:.2f}) से कम पर बेचा जा रहा है! आपको प्रति पीस **₹{per_piece_loss:.2f} का घाटा (नुकसान)** होगा!")
-        elif rate < fixed_price:
-            reduced_margin = fixed_price - rate
-            st.warning(f"⚠️ **ध्यान दें:** निर्धारित मूल्य ₹{fixed_price:.2f} से ₹{reduced_margin:.2f} कम दर पर बेचा जा रहा है!")
-
-        with col4:
-            st.write(f"दुकान में शेष: **{max(0, avail_stock)}** पीस")
-            if st.button("➕ लिस्ट में जोड़ें", use_container_width=True, disabled=(avail_stock <= 0)):
-                if avail_stock < qty:
-                    st.error("स्टॉक पर्याप्त नहीं है!")
-                elif rate < cost_price and st.session_state.role != "admin":
-                    st.error("❌ ऑपरेटर को घाटे में सामान बेचने की अनुमति नहीं है!")
-                else:
-                    conn = sqlite3.connect(DB_NAME)
-                    c = conn.cursor()
-                    c.execute("SELECT id, serial_no FROM item_units WHERE product_id = ? AND status = 'IN_STOCK' LIMIT ?", (int(item_data["id"]), int(qty)))
-                    available_units = c.fetchall()
-                    conn.close()
-
-                    for u_row in available_units:
-                        base_total = rate
-                        gst_amt = (base_total * gst_p) / 100.0
-                        net_item_profit = rate - cost_price
-                        calc_commission = (net_item_profit * op_comm_rate) / 100.0 if net_item_profit > 0 else 0.0
-
-                        st.session_state.billing_cart.append({
-                            "unit_id": int(u_row[0]),
-                            "id": int(item_data["id"]),
-                            "serial_no": str(u_row[1]),
-                            "name": str(item_data["name"]),
-                            "qty": 1,
-                            "rate": float(rate),
-                            "buy_price": cost_price,
-                            "gst_percent": float(gst_p),
-                            "gst_amount": float(gst_amt),
-                            "total": float(base_total + gst_amt),
-                            "profit": float(net_item_profit),
-                            "commission": float(calc_commission)
-                        })
-                    st.rerun()
-    else:
-        st.warning("दुकान में कोई सामान स्टॉक में नहीं है!")
-
-    if st.session_state.billing_cart:
-        st.markdown("---")
-        st.markdown("#### 📋 चालू POS बिल लिस्ट")
-        cart_df = pd.DataFrame(st.session_state.billing_cart)[["name", "serial_no", "qty", "rate", "gst_percent", "gst_amount", "total"]]
-        cart_df.columns = ["सामान", "सीरियल नं", "मात्रा", "दर (₹)", "GST %", "GST (₹)", "कुल (₹)"]
-        st.dataframe(cart_df, use_container_width=True)
-
-        total_bill_amount = sum(item["total"] for item in st.session_state.billing_cart)
-        total_gst_collected = sum(item["gst_amount"] for item in st.session_state.billing_cart)
-        
-        st.markdown(f"### 💵 कुल बिल राशि: **₹{total_bill_amount:.2f}** <small style='font-size:15px;'>(कुल GST शामिल: ₹{total_gst_collected:.2f})</small>", unsafe_allow_html=True)
-
-        upi_url = f"upi://pay?pa={current_upi_id}&pn={urllib.parse.quote(current_shop_name)}&am={total_bill_amount:.2f}&cu=INR"
-        qr_api_url = f"https://api.qrserver.com/v1/create-qr-code/?size=180x180&data={urllib.parse.quote(upi_url)}"
-
-        c_pay1, c_pay2, c_pay3 = st.columns([2, 2, 2])
-        payment_mode = c_pay1.selectbox("💳 भुगतान का तरीका (Payment Mode)", ["नकद (Cash)", "ऑनलाइन (UPI QR Scanner)", "उधारी (Credit / Udhar)"])
-        
-        due_date_val = None
-        if payment_mode == "उधारी (Credit / Udhar)":
-            due_date_val = c_pay2.date_input("📅 उधारी चुकाने की अंतिम तारीख (Due Date)", min_value=date.today(), value=date.today() + timedelta(days=7))
-        elif payment_mode == "ऑनलाइन (UPI QR Scanner)":
-            with c_pay3:
-                st.image(qr_api_url, caption=f"₹{total_bill_amount:.2f} स्कैन करें", width=140)
-
-        col_b1, col_b2 = st.columns([2, 1])
-        with col_b1:
-            if st.button("✅ फाइनल GST बिल काटें और स्टॉक घटाएं", type="primary", use_container_width=True):
-                if payment_mode == "उधारी (Credit / Udhar)" and (not cust_name.strip() or cust_name.strip() == "नकद ग्राहक"):
-                    st.error("उधारी बिल के लिए कृपया ग्राहक का सही नाम दर्ज करें!")
-                else:
-                    bill_no = "BILL-" + datetime.now().strftime("%Y%m%d%H%M%S")
-                    now_str = datetime.now().strftime("%d-%m-%Y %I:%M %p")
-                    conn = sqlite3.connect(DB_NAME)
-                    cursor = conn.cursor()
-
-                    for item in st.session_state.billing_cart:
-                        if item.get("unit_id"):
-                            cursor.execute("UPDATE item_units SET status = 'SOLD' WHERE id = ?", (int(item["unit_id"]),))
-                        elif item.get("serial_no"):
-                            cursor.execute("UPDATE item_units SET status = 'SOLD' WHERE serial_no = ?", (str(item["serial_no"]),))
-                        
-                        cursor.execute("UPDATE products SET stock = stock - 1 WHERE id = ?", (int(item["id"]),))
-                        
-                        cursor.execute("""
-                            INSERT INTO sales (bill_no, product_id, serial_no, product_name, quantity, sell_price, gst_percent, gst_amount, total_amount, profit, operator_commission, sold_by, customer_name, customer_phone, payment_mode, due_date)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (bill_no, int(item["id"]), str(item.get("serial_no", "")), item["name"], 1, float(item["rate"]), float(item["gst_percent"]), float(item["gst_amount"]), float(item["total"]), float(item["profit"]), float(item.get("commission", 0.0)), str(st.session_state.username), str(cust_name), str(cust_phone), str(payment_mode), str(due_date_val) if due_date_val else ""))
-
-                    if payment_mode == "उधारी (Credit / Udhar)":
-                        cursor.execute("""
-                            INSERT INTO udhar_ledger (bill_no, customer_name, customer_phone, total_amount, paid_amount, due_date, status)
-                            VALUES (?, ?, ?, ?, 0, ?, 'PENDING')
-                        """, (bill_no, str(cust_name), str(cust_phone), float(total_bill_amount), str(due_date_val)))
-
-                    conn.commit()
-                    conn.close()
-
-                    st.session_state.last_bill = {
-                        "bill_no": bill_no,
-                        "date": now_str,
-                        "customer": cust_name,
-                        "phone": cust_phone,
-                        "payment_mode": payment_mode,
-                        "due_date": str(due_date_val) if due_date_val else "N/A",
-                        "items": list(st.session_state.billing_cart),
-                        "total": total_bill_amount,
-                        "total_gst": total_gst_collected,
-                        "sold_by": st.session_state.username,
-                        "qr_url": qr_api_url
-                    }
-                    st.session_state.billing_cart = []
-                    st.success("⚡ GST बिल सफलतापूर्वक कट गया!")
-                    st.rerun()
-
-        with col_b2:
-            if st.button("❌ लिस्ट खाली करें", use_container_width=True):
-                st.session_state.billing_cart = []
-                st.rerun()
-
-    if st.session_state.last_bill:
-        b = st.session_state.last_bill
-        st.divider()
-        st.subheader("🧾 GST बिल इनवॉइस व UPI QR रसीद")
-
-        rows_html = "".join([f"<tr><td>{it['name']}<br/><small style='color:#555;'>SN: {it.get('serial_no', 'N/A')}</small></td><td>{it['qty']}</td><td>₹{it['rate']:.2f}</td><td>{it['gst_percent']}%</td><td>₹{it['total']:.2f}</td></tr>" for it in b["items"]])
-        due_txt = f"<b>उधारी देय तिथि:</b> {b['due_date']}<br/>" if b.get('due_date') and b['due_date'] != 'N/A' else ""
-        phone_txt = b['phone'] if b.get('phone') else 'N/A'
-        gst_txt = f"<b>GSTIN:</b> {current_gstin}<br/>" if current_gstin else ""
-
-        bill_html = f"""
-        <div id="printArea" style="border: 1px solid #000; padding: 15px; width: 360px; font-family: monospace; background: #fff; color: #000; margin: auto;">
-            <h3 style="text-align:center; margin:0;">{current_shop_name}</h3>
-            <p style="text-align:center; margin:2px 0 10px 0; font-size:12px;">टैक्स इनवॉइस | धन्यवाद! पुनः पधारें</p>
-            <hr style="border-top: 1px dashed #000;"/>
-            <div style="font-size: 13px;">
-                {gst_txt}
-                <b>बिल नं:</b> {b['bill_no']}<br/>
-                <b>तारीख:</b> {b['date']}<br/>
-                <b>ग्राहक:</b> {b['customer']}<br/>
-                <b>मोबाइल:</b> {phone_txt}<br/>
-                <b>भुगतान:</b> {b['payment_mode']}<br/>
-                {due_txt}
-                <b>कैशियर:</b> {b['sold_by']}
-            </div>
-            <hr style="border-top: 1px dashed #000;"/>
-            <table style="width:100%; font-size:12px; text-align:left;">
-                <tr><th>सामान (S/N)</th><th>मात्रा</th><th>दर</th><th>GST</th><th>कुल</th></tr>
-                {rows_html}
-            </table>
-            <hr style="border-top: 1px dashed #000;"/>
-            <div style="font-size: 13px; text-align: right;">
-                <b>कुल GST: ₹{b.get('total_gst', 0.0):.2f}</b><br/>
-                <h3 style="margin:5px 0;">कुल राशि: ₹{b['total']:.2f}</h3>
-            </div>
-            <hr style="border-top: 1px dashed #000;"/>
-            <div style="text-align:center;">
-                <img src="{b.get('qr_url')}" width="120" style="margin:5px 0;"/>
-                <p style="font-size:11px; margin:0;">PhonePe / GPay / Paytm से स्कैन करें</p>
-            </div>
-            <hr style="border-top: 1px dashed #000;"/>
-            <p style="text-align:center; font-size:11px; margin:0;">कंप्यूटरीकृत GST रसीद | सॉफ्टवेयर जनरेटेड</p>
-        </div>
-        """
-        st.components.v1.html(bill_html, height=520)
-
-# ==========================================
-# 4. सेल्स रिटर्न व रिफंड मैनेजमेंट
-# ==========================================
-elif mode == "🔄 सेल्स रिटर्न व रिफंड":
-    st.subheader("🔄 सेल्स रिटर्न, रिप्लेसमेंट एवं रिफंड काउंटर")
-    conn = sqlite3.connect(DB_NAME)
-    ret_bill_no = st.text_input("🔍 बिल नंबर दर्ज करें (उदा. BILL-20260825...):")
-
-    if ret_bill_no.strip():
-        bill_sales = pd.read_sql_query("SELECT id, bill_no, product_id, product_name, serial_no, quantity, sell_price, gst_percent, total_amount, sold_by, customer_name, sale_date FROM sales WHERE bill_no = ?", conn, params=(ret_bill_no.strip(),))
-        
-        if not bill_sales.empty:
-            st.success(f"✅ बिल मिला: ग्राहक '{bill_sales.iloc[0]['customer_name']}'")
-            st.dataframe(bill_sales[["product_name", "serial_no", "sell_price", "gst_percent", "total_amount"]], use_container_width=True)
-
-            with st.form("process_return_form"):
-                selected_item_name = st.selectbox("वापस लेने वाला सामान चुनें:", bill_sales["product_name"].tolist())
-                sel_row = bill_sales[bill_sales["product_name"] == selected_item_name].iloc[0]
-                reason = st.text_input("वापसी का कारण (Reason):", placeholder="उदा. डिफेक्टिव पीस")
-
-                if st.form_submit_button("🔄 रिटर्न स्वीकार करें", type="primary", use_container_width=True):
-                    c = conn.cursor()
-                    c.execute("UPDATE products SET stock = stock + 1 WHERE id = ?", (int(sel_row["product_id"]),))
-                    if sel_row["serial_no"]:
-                        c.execute("UPDATE item_units SET status = 'IN_STOCK' WHERE serial_no = ?", (str(sel_row["serial_no"]),))
-                    
-                    c.execute("""
-                        INSERT INTO sales_returns (bill_no, product_id, product_name, returned_qty, refund_amount, return_reason, returned_by)
-                        VALUES (?, ?, ?, 1, ?, ?, ?)
-                    """, (ret_bill_no.strip(), int(sel_row["product_id"]), selected_item_name, float(sel_row["total_amount"]), reason.strip(), str(st.session_state.username)))
-                    conn.commit()
-                    st.success(f"🎉 '{selected_item_name}' वापस ले लिया गया और स्टॉक में जुड़ गया!")
-                    st.rerun()
-        else:
-            st.error("❌ यह बिल नंबर नहीं मिला।")
-    conn.close()
-
-# ==========================================
-# 5. बारकोड व QR स्टिकर प्रिंटर
-# ==========================================
-elif mode == "🏷️ बारकोड स्टिकर प्रिंटर":
-    st.subheader("🏷️ प्रोडक्ट बारकोड स्टिकर व प्राइस टैग जनरेटर")
-    st.caption("चयनित सामान के प्रत्येक उपलब्ध पीस का अलग-अलग बारकोड स्टिकर प्रिंट करें")
-
-    conn = sqlite3.connect(DB_NAME)
-    products_df = pd.read_sql_query("SELECT id, name, category, sell_price, gst_percent, stock FROM products WHERE stock > 0", conn)
-    
-    c_set = conn.cursor()
-    c_set.execute("SELECT shop_title FROM shop_settings WHERE id=1")
-    s_info = c_set.fetchone()
-    current_shop_name = s_info[0] if s_info else "Raju Bhaiya Store"
-
-    if not products_df.empty:
-        selected_prod_name = st.selectbox("सामान चुनें:", products_df["name"].tolist())
-        target_prod = products_df[products_df["name"] == selected_prod_name].iloc[0]
-        p_id = int(target_prod["id"])
-        total_stock = int(target_prod["stock"])
-
-        units_df = pd.read_sql_query("SELECT id, serial_no FROM item_units WHERE product_id = ? AND status = 'IN_STOCK'", conn, params=(p_id,))
-        conn.close()
-
-        all_units_serials = units_df["serial_no"].tolist() if not units_df.empty else [f"SN-{p_id:04d}-{i+1:02d}" for i in range(total_stock)]
-
-        col_st1, col_st2 = st.columns([1, 1])
-        with col_st1:
-            print_mode = st.radio("प्रिंट विकल्प चुनें:", [f"🖨️ दुकान में मौजूद सभी {len(all_units_serials)} पीस प्रिंट करें", "🎯 केवल कुछ चुनिंदा पीस चुनें"])
-            selected_serials_to_print = all_units_serials if print_mode.startswith("🖨️ दुकान में मौजूद सभी") else st.multiselect("सीरियल नंबर चुनें:", all_units_serials, default=all_units_serials[:min(6, len(all_units_serials))])
-            show_price = st.checkbox("स्टीकर पर MRP दिखाएं", value=True)
-            st.success(f"✅ कुल प्रिंट होने वाले बारकोड: **{len(selected_serials_to_print)}** पीस")
-
-        with col_st2:
-            sample_code = selected_serials_to_print[0] if selected_serials_to_print else "SN-000000"
-            price_display = f"<div style='font-size:15px; font-weight:bold; color:#000;'>MRP: ₹{target_prod['sell_price']:.2f}</div>" if show_price else ""
-            
-            preview_html = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
-                <style>
-                    body {{ margin: 0; background: transparent; display: flex; justify-content: center; align-items: center; }}
-                    .tag-box {{ border: 2px dashed #1E88E5; padding: 10px; width: 210px; text-align: center; font-family: Arial, sans-serif; background: #ffffff; border-radius: 8px; }}
-                    .shop-title {{ font-size: 11px; font-weight: bold; color: #1E88E5; text-transform: uppercase; margin-bottom: 2px; }}
-                    .prod-title {{ font-size: 13px; font-weight: bold; color: #111; margin-bottom: 4px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }}
-                    svg {{ max-width: 190px; height: 50px; }}
-                </style>
-            </head>
-            <body>
-                <div class="tag-box">
-                    <div class="shop-title">{current_shop_name}</div>
-                    <div class="prod-title">{target_prod['name']}</div>
-                    <svg id="preview_barcode"></svg>
-                    {price_display}
+    <!-- 1. पब्लिक डिजिटल शोरूम (डिफ़ॉल्ट व्यू) -->
+    <div id="publicStoreView" class="min-h-screen flex flex-col">
+        <header class="bg-slate-900 border-b border-slate-800 sticky top-0 z-40 p-4 shadow-lg">
+            <div class="max-w-6xl mx-auto flex flex-wrap justify-between items-center gap-3">
+                <div class="flex items-center gap-3">
+                    <div class="w-10 h-10 bg-emerald-600 rounded-xl flex items-center justify-center text-white text-xl">
+                        <i class="fa-solid fa-store"></i>
+                    </div>
+                    <div>
+                        <h1 class="font-bold text-base md:text-lg text-white leading-tight">{{ settings.shop_name }}</h1>
+                        <p class="text-[11px] text-emerald-400">{{ settings.tagline }}</p>
+                    </div>
                 </div>
-                <script>
-                    JsBarcode("#preview_barcode", "{sample_code}", {{ format: "CODE128", width: 2, height: 40, displayValue: true, fontSize: 13, margin: 0 }});
-                </script>
-            </body>
-            </html>
-            """
-            st.components.v1.html(preview_html, height=190)
+                <div class="flex items-center gap-2">
+                    <a href="https://wa.me/91{{ settings.phone }}" target="_blank" class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-xs font-bold flex items-center gap-1.5 text-white">
+                        <i class="fa-brands fa-whatsapp text-sm"></i> संपर्क करें
+                    </a>
+                    <button onclick="openLoginModal()" class="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-500 rounded-lg text-xs font-bold text-white shadow-lg shadow-blue-600/30 transition">
+                        <i class="fa-solid fa-lock mr-1"></i> 🔐 स्टाफ़ लॉगिन
+                    </button>
+                </div>
+            </div>
+        </header>
 
-        st.divider()
-        tags_script_loop = "".join([f'JsBarcode("#barcode_{i}", "{code}", {{ format: "CODE128", width: 1.8, height: 38, displayValue: true, fontSize: 12, margin: 0 }});\n' for i, code in enumerate(selected_serials_to_print)])
-        tags_divs_loop = "".join([f"""
-        <div style='border: 1px solid #000; padding: 6px; width: 180px; text-align: center; font-family: Arial, sans-serif; background: #fff; margin: 5px; display: inline-block; border-radius: 4px; page-break-inside: avoid;'>
-            <div style='font-size: 10px; font-weight: bold; color: #1E88E5;'>{current_shop_name}</div>
-            <div style='font-size: 12px; font-weight: bold; color: #000; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;'>{target_prod['name']}</div>
-            <svg id='barcode_{i}' style='max-width: 165px; height: 45px;'></svg>
-            {price_display}
+        <main class="max-w-6xl mx-auto p-4 md:p-6 space-y-6 flex-1 w-full">
+            <div class="bg-gradient-to-r from-blue-900/40 via-indigo-900/30 to-purple-900/40 border border-indigo-800/40 p-6 rounded-2xl text-center space-y-2">
+                <h2 class="text-xl md:text-2xl font-bold text-white">🛍️ हमारा डिजिटल शोरूम व कैटलॉग</h2>
+                <p class="text-xs md:text-sm text-slate-300 max-w-xl mx-auto">नीचे दिए गए सभी प्रोडक्ट्स हमारी दुकान पर उपलब्ध हैं। खरीदने हेतु <b>WhatsApp ऑर्डर</b> पर क्लिक करें।</p>
+                <div class="pt-2 max-w-md mx-auto">
+                    <input type="text" id="publicSearchInput" onkeyup="filterPublicStore()" placeholder="सामान का नाम या मॉडल खोजें..." class="w-full bg-slate-900 border border-slate-700 px-4 py-2.5 rounded-xl text-sm text-white focus:outline-none focus:border-emerald-500">
+                </div>
+            </div>
+            <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4" id="publicProductGrid"></div>
+        </main>
+
+        <footer class="border-t border-slate-800 text-center p-6 text-xs text-slate-500 mt-12 bg-slate-900/50">
+            <p class="font-semibold text-slate-400">{{ settings.shop_name }}</p>
+            <p class="mt-1">📍 पता: {{ settings.address }} | 📞 फ़ोन: {{ settings.phone }}</p>
+            <p class="mt-2 text-emerald-500">✅ 100% ओरिजिनल व टेस्टेड प्रोडक्ट्स</p>
+        </footer>
+    </div>
+
+    <!-- 2. सुरक्षित लॉगिन मॉडल -->
+    <div id="loginModal" class="hidden fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-8 shadow-2xl space-y-6 relative">
+            <button onclick="closeLoginModal()" class="absolute top-4 right-4 text-slate-400 hover:text-white"><i class="fa-solid fa-xmark text-xl"></i></button>
+            <div class="text-center space-y-2">
+                <div class="w-14 h-14 bg-blue-600 rounded-2xl mx-auto flex items-center justify-center text-white text-2xl shadow-lg shadow-blue-500/30">
+                    <i class="fa-solid fa-user-shield"></i>
+                </div>
+                <h2 class="text-xl font-bold text-white tracking-wide">ERP मास्टर लॉगिन</h2>
+                <p class="text-xs text-slate-400">कृपया अपना अधिकृत यूज़रनेम व पासवर्ड दर्ज करें</p>
+            </div>
+            <div class="space-y-4">
+                <div>
+                    <label class="text-xs text-slate-400 font-semibold block mb-1">यूज़रनेम (Username)</label>
+                    <input type="text" id="loginUsername" placeholder="यूज़रनेम दर्ज करें" class="w-full bg-slate-950 border border-slate-700 px-4 py-2.5 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500">
+                </div>
+                <div>
+                    <label class="text-xs text-slate-400 font-semibold block mb-1">पासवर्ड (Password)</label>
+                    <input type="password" id="loginPassword" placeholder="••••••••" class="w-full bg-slate-950 border border-slate-700 px-4 py-2.5 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500" onkeydown="if(event.key==='Enter') handleUserLogin()">
+                </div>
+                <button onclick="handleUserLogin()" class="w-full py-3 bg-blue-600 hover:bg-blue-500 rounded-lg font-bold text-white text-sm shadow-lg shadow-blue-600/30 transition">🔐 सिस्टम में प्रवेश करें</button>
+            </div>
         </div>
-        """ for i, _ in enumerate(selected_serials_to_print)])
+    </div>
 
-        print_sheet_script = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
-        </head>
-        <body style="margin:0; padding:0;">
-            <button onclick="printLabels()" style="background-color:#1E88E5; color:white; padding:12px 24px; font-size:16px; font-weight:bold; border:none; border-radius:6px; cursor:pointer; width:100%;">🖨️ ये सभी {len(selected_serials_to_print)} अलग-अलग बारकोड स्टिकर प्रिंट करें</button>
-            <script>
-            function printLabels() {{
-                var win = window.open('', '', 'height=650,width=850');
-                win.document.write(`
-                    <html>
-                    <head>
-                        <title>Print Barcode Stickers</title>
-                        <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"><\/script>
-                        <style> body {{ margin: 10px; font-family: Arial, sans-serif; }} .print-grid {{ display: flex; flex-wrap: wrap; justify-content: flex-start; }} @media print {{ button {{ display: none; }} }} </style>
-                    </head>
-                    <body>
-                        <div class="print-grid">{tags_divs_loop}</div>
-                        <script> {tags_script_loop} setTimeout(function() {{ window.print(); window.close(); }}, 500); <\/script>
-                    </body>
-                    </html>
-                `);
-                win.document.close();
-                win.focus();
-            }}
-            </script>
-        </body>
-        </html>
-        """
-        st.components.v1.html(print_sheet_script, height=70)
-    else:
-        conn.close()
-        st.info("दुकान में कोई सामान नहीं है।")
+    <!-- 3. मुख्य ERP इंटरफ़ेस (सभी 11 मॉड्यूल्स) -->
+    <div id="mainAppInterface" class="hidden min-h-screen flex flex-col md:flex-row bg-slate-900">
+        <aside class="w-full md:w-64 bg-slate-950 border-r border-slate-800 flex flex-col justify-between shrink-0">
+            <div>
+                <div class="p-4 border-b border-slate-800 flex items-center gap-3">
+                    <i class="fa-solid fa-mobile-screen-button text-blue-500 text-2xl"></i>
+                    <div>
+                        <h1 class="font-bold text-sm text-white leading-tight">{{ settings.shop_name }}</h1>
+                        <span class="text-xs font-medium" id="userRoleBadge">● User Mode</span>
+                    </div>
+                </div>
+                <nav class="p-3 space-y-1 text-sm">
+                    <button onclick="showModule('dashboard')" class="w-full flex items-center gap-3 px-3 py-2 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-500 transition"><i class="fa-solid fa-chart-line w-5"></i> 📊 लाइव डैशबोर्ड</button>
+                    <button onclick="showModule('pos')" class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 transition"><i class="fa-solid fa-cash-register w-5 text-emerald-400"></i> ⚡ POS बिलिंग (Beep)</button>
+                    <button onclick="showModule('stock')" class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 transition"><i class="fa-solid fa-boxes-stacked w-5 text-amber-400"></i> 📦 नया स्टॉक व एडिट</button>
+                    <button onclick="showModule('stickers')" class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 transition"><i class="fa-solid fa-barcode w-5 text-purple-400"></i> 🏷️ बारकोड/लेबल प्रिंट</button>
+                    <button onclick="showModule('repair')" class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 transition"><i class="fa-solid fa-screwdriver-wrench w-5 text-cyan-400"></i> 📱 मोबाइल रिपेयरिंग</button>
+                    <button onclick="showModule('udhar')" class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 transition"><i class="fa-solid fa-book-journal-whills w-5 text-rose-400"></i> 📒 उधारी / खाता</button>
+                    <button onclick="showModule('returns')" class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 transition"><i class="fa-solid fa-right-left w-5 text-orange-400"></i> 🔄 सेल्स रिटर्न/डैमेज</button>
+                    
+                    <div id="adminMenuSection" class="space-y-1 pt-2 border-t border-slate-800">
+                        <span class="px-3 text-[10px] uppercase font-bold text-indigo-400">एडमिन कंट्रोल्स</span>
+                        <button onclick="showModule('operators')" class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 transition"><i class="fa-solid fa-users-gear w-5 text-indigo-400"></i> 👥 ऑपरेटर परमिशन</button>
+                        <button onclick="showModule('reports')" id="navReportsBtn" class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 transition"><i class="fa-solid fa-file-invoice-dollar w-5 text-yellow-400"></i> 📄 GSTR-1 व खर्चे</button>
+                        <button onclick="showModule('settings')" class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800 transition"><i class="fa-solid fa-gears w-5 text-slate-400"></i> 💾 बैकअप व सेटिंग्स</button>
+                    </div>
 
-# ==========================================
-# 6. GSTR-1 टैक्स रिपोर्ट
-# ==========================================
-elif mode == "📄 GSTR-1 टैक्स रिपोर्ट":
-    st.subheader("📄 GSTR-1 एवं सरकारी टैक्स रिटर्न रिपोर्ट")
-    conn = sqlite3.connect(DB_NAME)
-    sales_df = pd.read_sql_query("SELECT * FROM sales", conn)
+                    <button onclick="switchToCustomerStore()" class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-emerald-400 hover:bg-slate-800 transition"><i class="fa-solid fa-globe w-5"></i> 🛍️ डिजिटल शोरूम देखें</button>
+                </nav>
+            </div>
+            
+            <div class="p-4 border-t border-slate-800 space-y-2">
+                <div class="text-xs text-slate-300">
+                    <p class="text-slate-500">लॉगिन उपयोगकर्ता:</p>
+                    <p class="font-bold text-white text-sm" id="activeUserNameDisplay">Admin</p>
+                </div>
+                <button onclick="handleUserLogout()" class="w-full py-2 bg-rose-950/60 hover:bg-rose-900 text-rose-300 border border-rose-800/60 rounded-lg text-xs font-semibold flex items-center justify-center gap-2">
+                    <i class="fa-solid fa-right-from-bracket"></i> 🚪 लॉगआउट (Logout)
+                </button>
+            </div>
+        </aside>
+
+        <!-- कार्यक्षेत्र -->
+        <main class="flex-1 p-4 md:p-6 overflow-y-auto max-h-screen">
+            
+            <!-- 1. लाइव डैशबोर्ड -->
+            <section id="mod-dashboard" class="space-y-6">
+                <div class="flex justify-between items-center">
+                    <div>
+                        <h2 class="text-2xl font-bold text-white">📊 लाइव बिज़नेस इंटेलिजेंस डैशबोर्ड</h2>
+                        <p class="text-xs text-slate-400">लाइव आंकड़े, शुद्ध मुनाफ़ा एवं गल्ला स्थिति</p>
+                    </div>
+                    <button onclick="loadDashboardData()" class="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-xs font-semibold rounded-lg border border-slate-700"><i class="fa-solid fa-arrows-rotate mr-1"></i> रिफ्रेश</button>
+                </div>
+                <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+                    <div class="bg-slate-950 p-4 rounded-xl border border-slate-800">
+                        <span class="text-xs text-slate-400">आज की बिक्री</span>
+                        <h3 class="text-xl font-bold text-emerald-400 mt-1" id="kpiTodaySales">₹0</h3>
+                    </div>
+                    <div class="bg-slate-950 p-4 rounded-xl border border-slate-800" id="kpiProfitBox">
+                        <span class="text-xs text-slate-400">आज का मुनाफ़ा</span>
+                        <h3 class="text-xl font-bold text-blue-400 mt-1" id="kpiTodayProfit">₹0</h3>
+                    </div>
+                    <div class="bg-slate-950 p-4 rounded-xl border border-slate-800">
+                        <span class="text-xs text-slate-400">रिपेयरिंग आय</span>
+                        <h3 class="text-xl font-bold text-cyan-400 mt-1" id="kpiRepairRevenue">₹0</h3>
+                    </div>
+                    <div class="bg-slate-950 p-4 rounded-xl border border-slate-800">
+                        <span class="text-xs text-slate-400">गल्ला कैश</span>
+                        <h3 class="text-xl font-bold text-amber-400 mt-1" id="kpiDrawerCash">₹0</h3>
+                    </div>
+                    <div class="bg-slate-950 p-4 rounded-xl border border-slate-800">
+                        <span class="text-xs text-slate-400">मार्केट उधारी</span>
+                        <h3 class="text-xl font-bold text-rose-400 mt-1" id="kpiTotalUdhar">₹0</h3>
+                    </div>
+                    <div class="bg-slate-950 p-4 rounded-xl border border-slate-800" id="kpiStockValBox">
+                        <span class="text-xs text-slate-400">स्टॉक वैल्यू</span>
+                        <h3 class="text-xl font-bold text-purple-400 mt-1" id="kpiStockVal">₹0</h3>
+                    </div>
+                </div>
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <div class="bg-slate-950 p-4 rounded-xl border border-slate-800">
+                        <h4 class="text-sm font-semibold mb-3">📈 साप्ताहिक बिक्री ट्रेंड</h4>
+                        <canvas id="salesProfitChart" height="180"></canvas>
+                    </div>
+                    <div class="bg-slate-950 p-4 rounded-xl border border-slate-800">
+                        <h4 class="text-sm font-semibold mb-3">🚨 कम स्टॉक व महत्वपूर्ण अलर्ट</h4>
+                        <div id="dashAlertsList" class="space-y-2 text-xs text-slate-300"></div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 2. POS बिलिंग -->
+            <section id="mod-pos" class="hidden space-y-6">
+                <div class="flex justify-between items-center">
+                    <h2 class="text-2xl font-bold text-white">⚡ सुपरफास्ट POS बिलिंग व सर्विस काउंटर</h2>
+                    <button onclick="toggleCameraScanner()" class="px-3 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-xs font-semibold"><i class="fa-solid fa-camera mr-1"></i> कैमरा स्कैनर (Beep)</button>
+                </div>
+                <div id="scannerContainer" class="hidden bg-slate-950 p-4 rounded-xl border border-indigo-500 max-w-sm mx-auto">
+                    <div id="reader"></div>
+                </div>
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    <div class="lg:col-span-2 bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-4">
+                        <div class="flex gap-2">
+                            <input type="text" id="posBarcodeGunInput" placeholder="बारकोड स्कैन करें या सीरियल नंबर लिखें..." class="flex-1 bg-slate-900 border border-slate-700 px-4 py-2.5 rounded-lg text-sm text-white" onkeydown="if(event.key==='Enter') handleScanAdd(this.value)">
+                            <button onclick="handleScanAdd(document.getElementById('posBarcodeGunInput').value)" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg text-sm font-semibold">जोड़ें</button>
+                        </div>
+                        <div class="p-3 bg-slate-900 border border-slate-800 rounded-lg flex flex-wrap gap-2 items-center">
+                            <span class="text-xs font-semibold text-cyan-400">🛠️ सर्विस / लेबर जोड़ें:</span>
+                            <button onclick="addCustomService('Software Flashing', 200)" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-xs rounded border border-slate-700">+ सॉफ्टवेयर (₹200)</button>
+                            <button onclick="addCustomService('Screen Guard Pasting', 50)" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-xs rounded border border-slate-700">+ ग्लास पेस्टिंग (₹50)</button>
+                            <button onclick="addCustomService('Data Backup/Transfer', 150)" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-xs rounded border border-slate-700">+ डेटा ट्रांसफर (₹150)</button>
+                            <button onclick="promptCustomLabour()" class="px-2.5 py-1 bg-cyan-900 text-cyan-200 hover:bg-cyan-800 text-xs rounded border border-cyan-700">+ कस्टम काम</button>
+                        </div>
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-left text-sm">
+                                <thead class="text-xs text-slate-400 bg-slate-900 border-b border-slate-800">
+                                    <tr>
+                                        <th class="p-2">विवरण</th>
+                                        <th class="p-2">सीरियल/कोड</th>
+                                        <th class="p-2">दर (₹)</th>
+                                        <th class="p-2">मात्रा</th>
+                                        <th class="p-2">कुल</th>
+                                        <th class="p-2 text-right">हटाएं</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="posCartBody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-4">
+                        <h3 class="font-bold text-sm text-white">ग्राहक व बिल सारांश</h3>
+                        <input type="text" id="posCustName" placeholder="ग्राहक का नाम" class="w-full bg-slate-900 border border-slate-700 p-2 rounded text-sm text-white">
+                        <input type="text" id="posCustPhone" placeholder="मोबाइल नंबर (WhatsApp)" class="w-full bg-slate-900 border border-slate-700 p-2 rounded text-sm text-white">
+                        <div class="space-y-2 border-t border-slate-800 pt-3 text-sm">
+                            <div class="flex justify-between"><span>सब-टोटल:</span><span id="posSubtotal">₹0</span></div>
+                            <div class="flex justify-between" id="discountInputRow"><span>डिस्काउंट (₹):</span><input type="number" id="posDiscount" value="0" onchange="calcPosTotal()" class="w-20 bg-slate-900 border border-slate-700 p-1 text-right text-xs rounded text-white"></div>
+                            <div class="flex justify-between text-base font-bold text-emerald-400"><span>अंतिम कुल:</span><span id="posGrandTotal">₹0</span></div>
+                        </div>
+                        <div class="space-y-2 pt-2">
+                            <select id="posPayMode" onchange="handlePayModeChange(this.value)" class="w-full bg-slate-900 border border-slate-700 p-2 rounded text-sm text-white">
+                                <option value="Cash">💵 100% नकद (Cash)</option>
+                                <option value="UPI">📱 100% ऑनलाइन UPI QR</option>
+                                <option value="Split">🔀 स्प्लिट (नकद + UPI)</option>
+                                <option value="Udhar">📒 100% उधारी (Credit)</option>
+                            </select>
+                            <div id="splitInputBox" class="hidden grid grid-cols-2 gap-2 pt-2">
+                                <input type="number" id="posSplitCash" placeholder="नकद ₹" class="bg-slate-900 border border-slate-700 p-2 rounded text-xs text-white">
+                                <input type="number" id="posSplitUpi" placeholder="UPI ₹" class="bg-slate-900 border border-slate-700 p-2 rounded text-xs text-white">
+                            </div>
+                        </div>
+                        <button onclick="checkoutSale()" class="w-full py-3 bg-emerald-600 hover:bg-emerald-500 rounded-lg font-bold text-white transition text-sm">✅ बिल बनाएं व WhatsApp भेजें</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 3. नया स्टॉक व एडिट -->
+            <section id="mod-stock" class="hidden space-y-6">
+                <div class="flex justify-between items-center">
+                    <div>
+                        <h2 class="text-2xl font-bold text-white">📦 नया स्टॉक एंट्री एवं करेक्शन सिस्टम</h2>
+                        <p class="text-xs text-slate-400">सीरियल/IMEI ग्रिड, फ़ोटो कैप्चर, बॉक्स/लूज़ व स्टॉक संपादन</p>
+                    </div>
+                    <button id="addStockBtn" onclick="openNewProductModal()" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg text-xs font-semibold"><i class="fa-solid fa-plus mr-1"></i> नया सामान जोड़ें</button>
+                </div>
+                <div class="bg-slate-950 p-4 rounded-xl border border-slate-800">
+                    <input type="text" id="stockSearchInput" onkeyup="filterStockTable()" placeholder="सामान का नाम खोजें..." class="w-full bg-slate-900 border border-slate-700 px-4 py-2 rounded-lg text-sm text-white mb-4">
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left text-sm" id="stockTable">
+                            <thead class="text-xs text-slate-400 bg-slate-900 border-b border-slate-800">
+                                <tr>
+                                    <th class="p-2">फ़ोटो</th>
+                                    <th class="p-2">सामान का नाम</th>
+                                    <th class="p-2">ब्रांड/कैटेगरी</th>
+                                    <th class="p-2">पैकेजिंग</th>
+                                    <th class="p-2" id="thCost">खरीद दर (₹)</th>
+                                    <th class="p-2">बिक्री दर (₹)</th>
+                                    <th class="p-2">स्टॉक (पीस)</th>
+                                    <th class="p-2 text-right">एडिट / करेक्शन</th>
+                                </tr>
+                            </thead>
+                            <tbody id="stockTableBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 4. बारकोड स्टिकर प्रिंटर -->
+            <section id="mod-stickers" class="hidden space-y-6">
+                <h2 class="text-2xl font-bold text-white">🏷️ बारकोड, IMEI व स्टिकर प्रिंटर (2x1 इंच)</h2>
+                <div class="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-4">
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div>
+                            <label class="text-xs text-slate-400">सामान चुनें:</label>
+                            <select id="stickerProductSelect" onchange="loadProductUnitsForStickers(this.value)" class="w-full bg-slate-900 border border-slate-700 p-2 rounded text-sm text-white mt-1"></select>
+                        </div>
+                        <div>
+                            <label class="text-xs text-slate-400">लेआउट:</label>
+                            <select id="stickerSize" class="w-full bg-slate-900 border border-slate-700 p-2 rounded text-sm text-white mt-1">
+                                <option value="50x25">थर्मल रोल (50mm x 25mm / 2x1 इंच)</option>
+                            </select>
+                        </div>
+                        <div class="flex items-end">
+                            <button onclick="printGeneratedStickers()" class="w-full py-2 bg-purple-600 hover:bg-purple-500 rounded text-sm font-semibold"><i class="fa-solid fa-print mr-1"></i> स्टिकर प्रिंट निकालें</button>
+                        </div>
+                    </div>
+                    <div id="stickerPreviewGrid" class="border border-slate-800 p-4 rounded-lg bg-slate-900 flex flex-wrap gap-3 max-h-96 overflow-y-auto"></div>
+                </div>
+            </section>
+
+            <!-- 5. मोबाइल रिपेयरिंग जॉब कार्ड -->
+            <section id="mod-repair" class="hidden space-y-6">
+                <div class="flex justify-between items-center">
+                    <div>
+                        <h2 class="text-2xl font-bold text-white">📱 मोबाइल रिपेयरिंग जॉब कार्ड व 12-प्वाइंट चेकलिस्ट</h2>
+                        <p class="text-xs text-slate-400">ग्राहक सुरक्षा, कानूनी नोट एवं 8-स्टेज वर्कफ़्लो</p>
+                    </div>
+                    <button onclick="openNewJobCardModal()" class="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 rounded-lg text-xs font-semibold"><i class="fa-solid fa-plus mr-1"></i> नया फोन जमा करें</button>
+                </div>
+                <div class="bg-slate-950 p-4 rounded-xl border border-slate-800 overflow-x-auto">
+                    <table class="w-full text-left text-sm">
+                        <thead class="text-xs text-slate-400 bg-slate-900 border-b border-slate-800">
+                            <tr>
+                                <th class="p-2">जॉब नंबर</th>
+                                <th class="p-2">ग्राहक</th>
+                                <th class="p-2">मॉडल व समस्या</th>
+                                <th class="p-2">अनुमानित (₹)</th>
+                                <th class="p-2">एडवांस (₹)</th>
+                                <th class="p-2">स्टेटस</th>
+                                <th class="p-2 text-right">एक्शन / WhatsApp</th>
+                            </tr>
+                        </thead>
+                        <tbody id="repairJobTableBody"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- 6. उधारी/खाता लेजर -->
+            <section id="mod-udhar" class="hidden space-y-6">
+                <div class="flex justify-between items-center">
+                    <div>
+                        <h2 class="text-2xl font-bold text-white">📒 उधारी / ग्राहक खाता लेजर</h2>
+                        <p class="text-xs text-slate-400">आंशिक भुगतान चुकता, ओवरड्यू अलर्ट एवं WhatsApp तगादा</p>
+                    </div>
+                </div>
+                <div class="bg-slate-950 p-4 rounded-xl border border-slate-800 overflow-x-auto">
+                    <table class="w-full text-left text-sm">
+                        <thead class="text-xs text-slate-400 bg-slate-900 border-b border-slate-800">
+                            <tr>
+                                <th class="p-2">ग्राहक का नाम</th>
+                                <th class="p-2">मोबाइल</th>
+                                <th class="p-2">कुल उधारी (₹)</th>
+                                <th class="p-2">जमा किया (₹)</th>
+                                <th class="p-2">शेष बकाया (₹)</th>
+                                <th class="p-2 text-right">एक्शन</th>
+                            </tr>
+                        </thead>
+                        <tbody id="udharTableBody"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- 7. सेल्स रिटर्न -->
+            <section id="mod-returns" class="hidden space-y-6">
+                <h2 class="text-2xl font-bold text-white">🔄 सेल्स रिटर्न, एक्सचेंज एवं डिफेक्टिव रूटिंग</h2>
+                <div class="bg-slate-950 p-4 rounded-xl border border-slate-800 max-w-xl space-y-3">
+                    <input type="text" id="retInvoiceNo" placeholder="बिल नंबर (BILL-XXXX) या सीरियल नंबर" class="w-full bg-slate-900 border border-slate-700 p-2 rounded text-sm text-white">
+                    <input type="text" id="retItemName" placeholder="सामान का नाम" class="w-full bg-slate-900 border border-slate-700 p-2 rounded text-sm text-white">
+                    <select id="retType" class="w-full bg-slate-900 border border-slate-700 p-2 rounded text-sm text-white">
+                        <option value="Replacement">🔄 सामान एक्सचेंज (Replacement)</option>
+                        <option value="Refund">💵 नकद / UPI रिफंड</option>
+                    </select>
+                    <input type="number" id="retAmount" placeholder="रिफंड राशि (₹)" class="w-full bg-slate-900 border border-slate-700 p-2 rounded text-sm text-white">
+                    <input type="text" id="retReason" placeholder="वापसी का कारण" class="w-full bg-slate-900 border border-slate-700 p-2 rounded text-sm text-white">
+                    <button onclick="submitReturn()" class="w-full py-2 bg-orange-600 hover:bg-orange-500 rounded text-sm font-bold">वापसी दर्ज करें</button>
+                </div>
+            </section>
+
+            <!-- 8. ऑपरेटर व परमिशन (एडमिन कंट्रोल) -->
+            <section id="mod-operators" class="hidden space-y-6">
+                <div class="flex justify-between items-center">
+                    <div>
+                        <h2 class="text-2xl font-bold text-white">👥 ऑपरेटर लिस्ट व कस्टम परमिशन</h2>
+                        <p class="text-xs text-slate-400">यहाँ से आप ऑपरेटर जोड़ें और उनके अधिकार (Edit Permissions) कभी भी बदलें</p>
+                    </div>
+                    <button onclick="openNewUserModal()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded text-xs font-bold">+ नया ऑपरेटर जोड़ें</button>
+                </div>
+                <div class="bg-slate-950 p-4 rounded-xl border border-slate-800 overflow-x-auto">
+                    <table class="w-full text-left text-sm">
+                        <thead class="text-xs text-slate-400 bg-slate-900 border-b border-slate-800">
+                            <tr>
+                                <th class="p-2">नाम</th>
+                                <th class="p-2">यूज़रनेम</th>
+                                <th class="p-2">रोल</th>
+                                <th class="p-2">मुनाफ़ा देखें</th>
+                                <th class="p-2">स्टॉक एडिट</th>
+                                <th class="p-2">छूट दें</th>
+                                <th class="p-2">टैक्स रिपोर्ट</th>
+                                <th class="p-2 text-right">एक्शन</th>
+                            </tr>
+                        </thead>
+                        <tbody id="operatorsTableBody"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- 9. GSTR-1 व खर्चे -->
+            <section id="mod-reports" class="hidden space-y-6">
+                <h2 class="text-2xl font-bold text-white">📄 GSTR-1 रेडी टैक्स रिपोर्ट व दुकान खर्चा</h2>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div class="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-3">
+                        <h3 class="text-sm font-semibold text-white">GSTR-1 सेल्स रिपोर्ट</h3>
+                        <a href="/api/export_gstr1" class="inline-block px-4 py-2 bg-yellow-600 hover:bg-yellow-500 text-slate-950 font-bold rounded text-xs"><i class="fa-solid fa-file-csv mr-1"></i> GSTR-1 CSV डाउनलोड</a>
+                    </div>
+                    <div class="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-3">
+                        <h3 class="text-sm font-semibold text-white">दैनिक दुकान खर्चा जोड़ें</h3>
+                        <input type="text" id="expCategory" placeholder="खर्च श्रेणी (किराया, चाय, बिजली)" class="w-full bg-slate-900 border border-slate-700 p-2 rounded text-xs text-white">
+                        <input type="number" id="expAmount" placeholder="राशि ₹" class="w-full bg-slate-900 border border-slate-700 p-2 rounded text-xs text-white">
+                        <button onclick="submitExpense()" class="w-full py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded text-xs font-semibold">खर्च दर्ज करें</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 10. ऑनलाइन शोरूम (एडमिन व्यू) -->
+            <section id="mod-store" class="hidden space-y-6">
+                <div class="flex justify-between items-center">
+                    <h2 class="text-2xl font-bold text-white">🛍️ डिजिटल ऑनलाइन स्टोर व WhatsApp कैटलॉग</h2>
+                    <button onclick="switchToCustomerStore()" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 rounded text-xs font-bold"><i class="fa-solid fa-store mr-1"></i> पब्लिक कस्टमर व्यू खोलें</button>
+                </div>
+                <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4" id="onlineStoreGrid"></div>
+            </section>
+
+            <!-- 11. सेटिंग्स व ऑटो-बैकअप -->
+            <section id="mod-settings" class="hidden space-y-6">
+                <h2 class="text-2xl font-bold text-white">💾 बैकअप, सुरक्षा एवं दुकान सेटिंग्स</h2>
+                <div class="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-4 max-w-xl">
+                    <input type="text" id="cfgShopName" value="{{ settings.shop_name }}" class="w-full bg-slate-900 border border-slate-700 p-2 rounded text-sm text-white">
+                    <input type="text" id="cfgPhone" value="{{ settings.phone }}" class="w-full bg-slate-900 border border-slate-700 p-2 rounded text-sm text-white">
+                    <input type="text" id="cfgUpi" value="{{ settings.upi_id }}" class="w-full bg-slate-900 border border-slate-700 p-2 rounded text-sm text-white">
+                    <button onclick="saveSettings()" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded text-sm font-bold">सेटिंग्स सुरक्षित करें</button>
+                    <div class="border-t border-slate-800 pt-4">
+                        <a href="/api/download_db" class="inline-block px-3 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded text-xs"><i class="fa-solid fa-download mr-1"></i> डेटाबेस बैकअप डाउनलोड (shop.db)</a>
+                    </div>
+                </div>
+            </section>
+
+        </main>
+    </div>
+
+    <!-- ==================== मॉडल्स ==================== -->
+    <div id="newProductModal" class="hidden fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
+        <div class="bg-slate-950 border border-slate-800 rounded-xl max-w-3xl w-full p-6 max-h-[90vh] overflow-y-auto space-y-4">
+            <div class="flex justify-between items-center border-b border-slate-800 pb-3">
+                <h3 class="font-bold text-lg text-white" id="productModalTitle">➕ नया स्टॉक जोड़ें</h3>
+                <button onclick="closeProductModal()"><i class="fa-solid fa-xmark text-xl"></i></button>
+            </div>
+            <input type="hidden" id="editProductId" value="">
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div>
+                    <label class="text-xs text-slate-400">सामान का नाम *</label>
+                    <input type="text" id="pName" placeholder="उदा. Fast Data Cable" class="w-full bg-slate-900 border border-slate-700 p-2 rounded text-xs text-white">
+                </div>
+                <div>
+                    <label class="text-xs text-slate-400">ब्रांड / कंपनी</label>
+                    <input type="text" id="pBrand" placeholder="उदा. Realme, Boat" class="w-full bg-slate-900 border border-slate-700 p-2 rounded text-xs text-white">
+                </div>
+                <div>
+                    <label class="text-xs text-slate-400">पैकेजिंग प्रकार</label>
+                    <select id="pPackType" class="w-full bg-slate-900 border border-slate-700 p-2 rounded text-xs text-white">
+                        <option value="Loose">खुला पीस (Loose Pieces)</option>
+                        <option value="Box">बॉक्स पैक (Master Box)</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="text-xs text-slate-400">खरीद दर प्रति पीस (₹) *</label>
+                    <input type="number" id="pCost" placeholder="उदा. 80" class="w-full bg-slate-900 border border-slate-700 p-2 rounded text-xs text-white">
+                </div>
+                <div>
+                    <label class="text-xs text-slate-400">बिक्री दर प्रति पीस (₹) *</label>
+                    <input type="number" id="pRetail" placeholder="उदा. 150" class="w-full bg-slate-900 border border-slate-700 p-2 rounded text-xs text-white">
+                </div>
+                <div>
+                    <label class="text-xs text-slate-400">मात्रा (कितने पीस हैं?) *</label>
+                    <input type="number" id="pQty" value="5" min="1" onchange="generateSerialGrid(this.value)" class="w-full bg-slate-900 border border-slate-700 p-2 rounded text-xs text-white">
+                </div>
+            </div>
+            <div class="border border-slate-800 p-3 rounded-lg bg-slate-900 space-y-2">
+                <label class="text-xs font-semibold text-cyan-400">📸 सामान की फ़ोटो अपलोड करें या बदलें:</label>
+                <input type="file" id="pPhotoFile" accept="image/*" class="text-xs text-slate-400">
+            </div>
+            <div class="space-y-2" id="serialGridWrapper">
+                <div class="flex justify-between items-center">
+                    <label class="text-xs font-semibold text-amber-400">📦 प्रत्येक पीस के सीरियल नंबर / बारकोड:</label>
+                    <button type="button" onclick="autoFillSerials()" class="px-2 py-1 bg-blue-600 hover:bg-blue-500 rounded text-[11px] font-semibold">⚡ 1-क्लिक सभी ऑटो-जनरेट</button>
+                </div>
+                <div id="serialGridContainer" class="grid grid-cols-2 md:grid-cols-3 gap-2 max-h-48 overflow-y-auto p-2 bg-slate-900 rounded-lg border border-slate-800"></div>
+            </div>
+            <button onclick="saveProductAndSerials()" class="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 rounded font-bold text-sm text-white">💾 नया सामान व सभी पीस सुरक्षित करें</button>
+        </div>
+    </div>
+
+    <!-- B. मोबाइल रिपेयरिंग जॉब कार्ड मॉडल -->
+    <div id="newJobModal" class="hidden fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
+        <div class="bg-slate-950 border border-slate-800 rounded-xl max-w-2xl w-full p-6 max-h-[90vh] overflow-y-auto space-y-4">
+            <div class="flex justify-between items-center border-b border-slate-800 pb-3">
+                <h3 class="font-bold text-lg text-white">📱 नया मोबाइल रिपेयरिंग जॉब कार्ड</h3>
+                <button onclick="closeJobModal()"><i class="fa-solid fa-xmark text-xl"></i></button>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <input type="text" id="jCustName" placeholder="ग्राहक का नाम *" class="bg-slate-900 border border-slate-700 p-2 rounded text-xs text-white">
+                <input type="text" id="jCustPhone" placeholder="मोबाइल नंबर (WhatsApp) *" class="bg-slate-900 border border-slate-700 p-2 rounded text-xs text-white">
+                <input type="text" id="jBrandModel" placeholder="कंपनी व मॉडल (उदा. Vivo Y20) *" class="bg-slate-900 border border-slate-700 p-2 rounded text-xs text-white">
+                <input type="text" id="jPassPin" placeholder="पैटर्न / स्क्रीन लॉक पिन" class="bg-slate-900 border border-slate-700 p-2 rounded text-xs text-white">
+            </div>
+            <div class="border border-slate-800 p-3 rounded-lg bg-slate-900 space-y-2">
+                <label class="text-xs font-semibold text-emerald-400">📋 12-प्वाइंट डिवाइस रिसीविंग चेकलिस्ट (जो ठीक है उसे टिक रखें):</label>
+                <div class="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
+                    <label class="flex items-center gap-1.5"><input type="checkbox" id="chkDisplay" checked> 📱 डिस्प्ले ठीक है</label>
+                    <label class="flex items-center gap-1.5"><input type="checkbox" id="chkTouch" checked> 👆 टच OK</label>
+                    <label class="flex items-center gap-1.5"><input type="checkbox" id="chkCamera" checked> 📷 कैमरा OK</label>
+                    <label class="flex items-center gap-1.5"><input type="checkbox" id="chkCharging" checked> ⚡ चार्जिंग OK</label>
+                    <label class="flex items-center gap-1.5"><input type="checkbox" id="chkSpeaker" checked> 🔊 स्पीकर OK</label>
+                    <label class="flex items-center gap-1.5"><input type="checkbox" id="chkMic" checked> 🎤 माइक OK</label>
+                    <label class="flex items-center gap-1.5"><input type="checkbox" id="chkNetwork" checked> 📶 नेटवर्क OK</label>
+                    <label class="flex items-center gap-1.5"><input type="checkbox" id="chkWater"> 💧 पानी में गिरा</label>
+                    <label class="flex items-center gap-1.5"><input type="checkbox" id="chkDead"> 📴 डेड / ग्राहक रिस्क</label>
+                </div>
+            </div>
+            <textarea id="jFault" placeholder="समस्या / ग्राहक की शिकायत विवरण..." class="w-full bg-slate-900 border border-slate-700 p-2 rounded text-xs text-white h-16"></textarea>
+            <div class="grid grid-cols-2 gap-3">
+                <input type="number" id="jEstCost" placeholder="अनुमानित खर्च ₹" class="bg-slate-900 border border-slate-700 p-2 rounded text-xs text-white">
+                <input type="number" id="jAdvPaid" placeholder="एडवांस जमा राशि ₹" class="bg-slate-900 border border-slate-700 p-2 rounded text-xs text-white">
+            </div>
+            <button onclick="saveJobCard()" class="w-full py-2.5 bg-cyan-600 hover:bg-cyan-500 rounded font-bold text-sm text-white">💾 जॉब कार्ड बनाएं व WhatsApp रसीद भेजें</button>
+        </div>
+    </div>
+
+    <!-- C. ऑपरेटर जोड़ना व एडिट मॉडल -->
+    <div id="newUserModal" class="hidden fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
+        <div class="bg-slate-950 border border-slate-800 rounded-xl max-w-lg w-full p-6 space-y-4">
+            <div class="flex justify-between items-center border-b border-slate-800 pb-2">
+                <h3 class="font-bold text-lg text-white" id="userModalTitle">👥 ऑपरेटर व परमिशन सेट करें</h3>
+                <button onclick="closeUserModal()"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <input type="hidden" id="editUserId" value="">
+            <div class="grid grid-cols-2 gap-3">
+                <div>
+                    <label class="text-[11px] text-slate-400">पूरा नाम</label>
+                    <input type="text" id="uFullName" placeholder="पूरा नाम" class="w-full bg-slate-900 border border-slate-700 p-2 rounded text-xs text-white">
+                </div>
+                <div>
+                    <label class="text-[11px] text-slate-400">यूज़रनेम *</label>
+                    <input type="text" id="uUsername" placeholder="यूज़रनेम" class="w-full bg-slate-900 border border-slate-700 p-2 rounded text-xs text-white">
+                </div>
+                <div>
+                    <label class="text-[11px] text-slate-400" id="lblPass">पासवर्ड *</label>
+                    <input type="password" id="uPassword" placeholder="पासवर्ड" class="w-full bg-slate-900 border border-slate-700 p-2 rounded text-xs text-white">
+                </div>
+                <div>
+                    <label class="text-[11px] text-slate-400">मोबाइल नंबर</label>
+                    <input type="text" id="uPhone" placeholder="मोबाइल नंबर" class="w-full bg-slate-900 border border-slate-700 p-2 rounded text-xs text-white">
+                </div>
+            </div>
+            <div class="border border-slate-800 p-3 rounded-lg bg-slate-900 space-y-2">
+                <span class="text-xs font-bold text-indigo-400">🔑 इस ऑपरेटर के पास कौन-से अधिकार होने चाहिए?</span>
+                <div class="grid grid-cols-2 gap-2 text-xs">
+                    <label class="flex items-center gap-2"><input type="checkbox" id="permProfit"> 📈 मुनाफ़ा व खरीद दर देखें</label>
+                    <label class="flex items-center gap-2"><input type="checkbox" id="permStock"> 📦 नया स्टॉक जोड़ें/एडिट करें</label>
+                    <label class="flex items-center gap-2"><input type="checkbox" id="permDiscount"> 🏷️ बिलिंग में छूट/डिस्काउंट दें</label>
+                    <label class="flex items-center gap-2"><input type="checkbox" id="permReports"> 📄 GSTR-1 व खर्चे देखें</label>
+                </div>
+            </div>
+            <button onclick="saveOperatorUser()" class="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 rounded font-bold text-sm text-white">💾 परमिशन सुरक्षित करें</button>
+        </div>
+    </div>
+
+    <!-- प्रिंट कंटेनर -->
+    <div id="printableArea" class="hidden"></div>
+
+    <!-- ==================== जावास्क्रिप्ट लॉजिक ==================== -->
+    <script>
+        let currentUser = null;
+        let cart = [];
+        let html5QrCode = null;
+        let globalProducts = [];
+        let globalUsers = [];
+
+        function openLoginModal() { document.getElementById('loginModal').classList.remove('hidden'); }
+        function closeLoginModal() { document.getElementById('loginModal').classList.add('hidden'); }
+
+        function switchToCustomerStore() {
+            document.getElementById('mainAppInterface').classList.add('hidden');
+            document.getElementById('publicStoreView').classList.remove('hidden');
+            loadPublicProducts();
+        }
+
+        async function handleUserLogin() {
+            const u = document.getElementById('loginUsername').value.trim();
+            const p = document.getElementById('loginPassword').value.trim();
+            if(!u || !p) return alert("कृपया यूज़रनेम व पासवर्ड दर्ज करें!");
+
+            const res = await fetch('/api/login', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ username: u, password: p })
+            });
+            const d = await res.json();
+            if(d.success) {
+                currentUser = d.user;
+                applyUserRolePermissions();
+                closeLoginModal();
+                document.getElementById('publicStoreView').classList.add('hidden');
+                document.getElementById('mainAppInterface').classList.remove('hidden');
+                loadDashboardData();
+            } else {
+                alert("गलत यूज़रनेम या पासवर्ड!");
+            }
+        }
+
+        function handleUserLogout() {
+            currentUser = null;
+            document.getElementById('loginUsername').value = '';
+            document.getElementById('loginPassword').value = '';
+            document.getElementById('mainAppInterface').classList.add('hidden');
+            document.getElementById('publicStoreView').classList.remove('hidden');
+            loadPublicProducts();
+        }
+
+        async function loadPublicProducts() {
+            const res = await fetch('/api/get_stock');
+            globalProducts = await res.json();
+            renderPublicStore(globalProducts);
+        }
+
+        function renderPublicStore(list) {
+            const grid = document.getElementById('publicProductGrid');
+            grid.innerHTML = '';
+            if(list.length === 0) {
+                grid.innerHTML = '<div class="col-span-full text-center py-12 text-slate-500">कोई सामान नहीं मिला</div>';
+                return;
+            }
+            list.forEach(p => {
+                const img = p.image_data ? `<img src="${p.image_data}" class="w-full h-36 md:h-40 object-cover rounded-xl mb-3">` : `<div class="h-36 md:h-40 bg-slate-900 rounded-xl flex items-center justify-center text-4xl mb-3">📦</div>`;
+                const inStock = p.stock_count > 0;
+                grid.innerHTML += `
+                    <div class="bg-slate-900 p-3.5 rounded-2xl border border-slate-800 flex flex-col justify-between hover:border-slate-700 transition">
+                        <div>
+                            ${img}
+                            <span class="text-[10px] font-semibold text-indigo-400 uppercase tracking-wider">${p.brand || 'Universal'}</span>
+                            <h3 class="font-bold text-sm text-white mt-0.5 truncate">${p.name}</h3>
+                            <div class="flex items-center justify-between mt-2">
+                                <span class="text-emerald-400 font-bold text-base">₹${p.retail_price}</span>
+                                <span class="text-[10px] px-2 py-0.5 rounded font-semibold ${inStock ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-rose-950 text-rose-400 border border-rose-800'}">${inStock ? 'उपलब्ध है' : 'स्टॉक समाप्त'}</span>
+                            </div>
+                        </div>
+                        <a href="https://wa.me/91{{ settings.phone }}?text=नमस्ते *{{ settings.shop_name }}*, मुझे *${encodeURIComponent(p.name)}* (₹${p.retail_price}) खरीदना/ऑर्डर करना है।" target="_blank" class="mt-4 w-full py-2 bg-emerald-600 hover:bg-emerald-500 text-center text-xs font-bold rounded-xl text-white flex items-center justify-center gap-1.5 transition shadow-lg shadow-emerald-900/30">
+                            <i class="fa-brands fa-whatsapp text-sm"></i> WhatsApp ऑर्डर
+                        </a>
+                    </div>
+                `;
+            });
+        }
+
+        function filterPublicStore() {
+            const q = document.getElementById('publicSearchInput').value.toLowerCase();
+            const filtered = globalProducts.filter(p => p.name.toLowerCase().includes(q) || (p.brand && p.brand.toLowerCase().includes(q)));
+            renderPublicStore(filtered);
+        }
+
+        function applyUserRolePermissions() {
+            if(!currentUser) return;
+            document.getElementById('activeUserNameDisplay').innerText = `${currentUser.full_name} (${currentUser.role})`;
+            
+            const isAdmin = currentUser.role === 'Admin';
+            const canProfit = isAdmin || currentUser.can_view_profit === 1;
+            const canStock = isAdmin || currentUser.can_edit_stock === 1;
+            const canDiscount = isAdmin || currentUser.can_give_discount === 1;
+            const canReports = isAdmin || currentUser.can_view_reports === 1;
+
+            document.getElementById('userRoleBadge').innerText = isAdmin ? '● Master Admin' : '● Operator Active';
+            document.getElementById('userRoleBadge').className = isAdmin ? 'text-xs text-amber-400 font-medium' : 'text-xs text-blue-400 font-medium';
+            
+            document.getElementById('kpiProfitBox').classList.toggle('hidden', !canProfit);
+            document.getElementById('kpiStockValBox').classList.toggle('hidden', !canProfit);
+            document.getElementById('thCost').classList.toggle('hidden', !canProfit);
+            document.getElementById('addStockBtn').classList.toggle('hidden', !canStock);
+            document.getElementById('discountInputRow').classList.toggle('hidden', !canDiscount);
+            document.getElementById('navReportsBtn').classList.toggle('hidden', !canReports);
+            document.getElementById('adminMenuSection').classList.toggle('hidden', !isAdmin);
+        }
+
+        function showModule(modId) {
+            ['dashboard', 'pos', 'stock', 'stickers', 'repair', 'udhar', 'returns', 'operators', 'reports', 'store', 'settings'].forEach(m => {
+                const el = document.getElementById('mod-' + m);
+                if(el) el.classList.add('hidden');
+            });
+            const activeEl = document.getElementById('mod-' + modId);
+            if(activeEl) activeEl.classList.remove('hidden');
+
+            if(modId === 'dashboard') loadDashboardData();
+            if(modId === 'stock') loadStockTable();
+            if(modId === 'repair') loadRepairJobs();
+            if(modId === 'udhar') loadUdharData();
+            if(modId === 'operators') loadOperators();
+            if(modId === 'store') loadOnlineStore();
+            if(modId === 'stickers') loadStickerProducts();
+        }
+
+        function playBeep() {
+            try {
+                const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                const osc = audioCtx.createOscillator();
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(1000, audioCtx.currentTime);
+                osc.connect(audioCtx.destination);
+                osc.start();
+                osc.stop(audioCtx.currentTime + 0.15);
+            } catch(e) {}
+        }
+
+        function toggleCameraScanner() {
+            const container = document.getElementById('scannerContainer');
+            if (container.classList.contains('hidden')) {
+                container.classList.remove('hidden');
+                html5QrCode = new Html5Qrcode("reader");
+                html5QrCode.start({ facingMode: "environment" }, { fps: 10, qrbox: { width: 250, height: 250 } }, (decodedText) => {
+                    playBeep();
+                    handleScanAdd(decodedText);
+                }).catch(err => alert("Camera Error: " + err));
+            } else {
+                container.classList.add('hidden');
+                if(html5QrCode) html5QrCode.stop();
+            }
+        }
+
+        async function handleScanAdd(code) {
+            if(!code) return;
+            const res = await fetch(`/api/scan_item?code=${encodeURIComponent(code)}`);
+            const data = await res.json();
+            if(data.success) {
+                playBeep();
+                cart.push({
+                    type: 'Product',
+                    product_id: data.item.product_id,
+                    unit_id: data.item.unit_id,
+                    name: data.item.name,
+                    serial: data.item.serial_no,
+                    cost: data.item.cost_price,
+                    price: data.item.retail_price,
+                    qty: 1
+                });
+                renderCart();
+                document.getElementById('posBarcodeGunInput').value = '';
+            } else {
+                alert(data.message || 'सामान नहीं मिला!');
+            }
+        }
+
+        function addCustomService(name, price) {
+            cart.push({ type: 'Service', product_id: null, unit_id: null, name: name, serial: 'SERVICE', cost: 0, price: parseFloat(price), qty: 1 });
+            renderCart();
+        }
+
+        function promptCustomLabour() {
+            const name = prompt("सर्विस / काम का नाम लिखें:", "मोबाइल रिपेयरिंग लेबर चार्ज");
+            if(!name) return;
+            const price = prompt("फीस / दर (₹):", "150");
+            if(price) addCustomService(name, price);
+        }
+
+        function renderCart() {
+            const tbody = document.getElementById('posCartBody');
+            tbody.innerHTML = '';
+            let subtotal = 0;
+            cart.forEach((item, index) => {
+                subtotal += (item.price * item.qty);
+                tbody.innerHTML += `
+                    <tr class="border-b border-slate-800">
+                        <td class="p-2 font-medium">${item.name}</td>
+                        <td class="p-2 text-xs text-slate-400">${item.serial}</td>
+                        <td class="p-2">₹${item.price}</td>
+                        <td class="p-2">${item.qty}</td>
+                        <td class="p-2 font-bold text-emerald-400">₹${item.price * item.qty}</td>
+                        <td class="p-2 text-right"><button onclick="cart.splice(${index},1); renderCart();" class="text-rose-400"><i class="fa-solid fa-trash"></i></button></td>
+                    </tr>
+                `;
+            });
+            document.getElementById('posSubtotal').innerText = '₹' + subtotal;
+            calcPosTotal();
+        }
+
+        function calcPosTotal() {
+            let subtotal = cart.reduce((acc, it) => acc + (it.price * it.qty), 0);
+            let disc = parseFloat(document.getElementById('posDiscount').value) || 0;
+            document.getElementById('posGrandTotal').innerText = '₹' + Math.max(0, subtotal - disc);
+        }
+
+        function handlePayModeChange(val) {
+            document.getElementById('splitInputBox').classList.toggle('hidden', val !== 'Split');
+        }
+
+        async function checkoutSale() {
+            if(cart.length === 0) return alert('कार्ट खाली है!');
+            const custName = document.getElementById('posCustName').value || 'Customer';
+            const custPhone = document.getElementById('posCustPhone').value || '';
+            const discount = parseFloat(document.getElementById('posDiscount').value) || 0;
+            const payMode = document.getElementById('posPayMode').value;
+            const splitCash = parseFloat(document.getElementById('posSplitCash').value) || 0;
+            const splitUpi = parseFloat(document.getElementById('posSplitUpi').value) || 0;
+
+            const res = await fetch('/api/checkout_sale', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    customer_name: custName,
+                    customer_phone: custPhone,
+                    items: cart,
+                    discount: discount,
+                    payment_mode: payMode,
+                    cash_paid: splitCash,
+                    upi_paid: splitUpi,
+                    sold_by_name: currentUser ? currentUser.full_name : 'Staff'
+                })
+            });
+            const result = await res.json();
+            if(result.success) {
+                alert(`✅ बिल तैयार! बिल नंबर: ${result.invoice_no}`);
+                if(custPhone) {
+                    const waText = `नमस्ते *${custName}* जी, *{{ settings.shop_name }}* से खरीद के लिए धन्यवाद! बिल नं: *${result.invoice_no}*, कुल राशि: *₹${result.total_amount}*।`;
+                    window.open(`https://wa.me/91${custPhone}?text=${encodeURIComponent(waText)}`, '_blank');
+                }
+                cart = [];
+                renderCart();
+            }
+        }
+
+        function openNewProductModal() {
+            document.getElementById('editProductId').value = '';
+            document.getElementById('productModalTitle').innerText = '➕ नया स्टॉक जोड़ें';
+            document.getElementById('pName').value = '';
+            document.getElementById('pBrand').value = '';
+            document.getElementById('pCost').value = '';
+            document.getElementById('pRetail').value = '';
+            document.getElementById('pQty').value = '5';
+            document.getElementById('serialGridWrapper').classList.remove('hidden');
+            document.getElementById('newProductModal').classList.remove('hidden');
+            generateSerialGrid(5);
+        }
+        function closeProductModal() { document.getElementById('newProductModal').classList.add('hidden'); }
+
+        function generateSerialGrid(qty) {
+            const container = document.getElementById('serialGridContainer');
+            container.innerHTML = '';
+            const count = parseInt(qty) || 1;
+            const seed = Math.floor(1000 + Math.random() * 9000);
+            for(let i = 1; i <= count; i++) {
+                container.innerHTML += `
+                    <div class="flex gap-1 items-center">
+                        <input type="text" id="serial_box_${i}" value="SN${seed}-${String(i).padStart(2,'0')}" class="w-full bg-slate-950 border border-slate-700 p-1.5 rounded text-xs text-white">
+                        <button type="button" onclick="singleRandomize(${i})" class="px-1.5 py-1 bg-slate-800 hover:bg-slate-700 rounded text-xs">🎲</button>
+                    </div>
+                `;
+            }
+        }
+
+        function singleRandomize(idx) {
+            const el = document.getElementById(`serial_box_${idx}`);
+            if(el) el.value = `SN${Math.floor(10000 + Math.random() * 90000)}-${String(idx).padStart(2,'0')}`;
+        }
+
+        function autoFillSerials() {
+            const qty = parseInt(document.getElementById('pQty').value) || 1;
+            generateSerialGrid(qty);
+        }
+
+        async function saveProductAndSerials() {
+            const editId = document.getElementById('editProductId').value;
+            const name = document.getElementById('pName').value.trim();
+            const brand = document.getElementById('pBrand').value.trim();
+            const packType = document.getElementById('pPackType').value;
+            const cost = parseFloat(document.getElementById('pCost').value) || 0;
+            const retail = parseFloat(document.getElementById('pRetail').value) || 0;
+            const qty = parseInt(document.getElementById('pQty').value) || 1;
+
+            if(!name || cost <= 0 || retail <= 0) return alert("कृपया सामान का नाम, खरीद दर व बिक्री दर भरें!");
+
+            const serials = [];
+            for(let i = 1; i <= qty; i++) {
+                const el = document.getElementById(`serial_box_${i}`);
+                if(el && el.value.trim()) serials.push(el.value.trim());
+            }
+
+            let photoData = "";
+            const fileInput = document.getElementById('pPhotoFile');
+            if(fileInput.files.length > 0) {
+                photoData = await new Promise((resolve) => {
+                    const reader = new FileReader();
+                    reader.onload = (e) => resolve(e.target.result);
+                    reader.readAsDataURL(fileInput.files[0]);
+                });
+            }
+
+            const res = await fetch('/api/add_product', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    product_id: editId,
+                    name: name,
+                    brand: brand,
+                    packaging_type: packType,
+                    purchase_cost: cost,
+                    retail_price: retail,
+                    quantity: qty,
+                    serials: serials,
+                    image_data: photoData
+                })
+            });
+            const d = await res.json();
+            if(d.success) {
+                alert("🎉 सामान व स्टॉक सुरक्षित हो गया!");
+                closeProductModal();
+                loadStockTable();
+                loadPublicProducts();
+            }
+        }
+
+        async function editProductStock(pId) {
+            const p = globalProducts.find(x => x.id === pId);
+            if(!p) return;
+            document.getElementById('editProductId').value = p.id;
+            document.getElementById('productModalTitle').innerText = '✏️ स्टॉक एडिट व करेक्शन';
+            document.getElementById('pName').value = p.name;
+            document.getElementById('pBrand').value = p.brand;
+            document.getElementById('pCost').value = p.purchase_cost;
+            document.getElementById('pRetail').value = p.retail_price;
+            document.getElementById('pPackType').value = p.packaging_type;
+            document.getElementById('serialGridWrapper').classList.add('hidden');
+            document.getElementById('newProductModal').classList.remove('hidden');
+        }
+
+        async function loadStockTable() {
+            const res = await fetch('/api/get_stock');
+            globalProducts = await res.json();
+            const tbody = document.getElementById('stockTableBody');
+            tbody.innerHTML = '';
+            globalProducts.forEach(p => {
+                const imgTag = p.image_data ? `<img src="${p.image_data}" class="w-8 h-8 object-cover rounded">` : `<span class="text-xl">📦</span>`;
+                const canProfit = currentUser && (currentUser.role === 'Admin' || currentUser.can_view_profit === 1);
+                const costCell = canProfit ? `<td class="p-2">₹${p.purchase_cost}</td>` : `<td class="p-2 text-slate-500">🔒 छिपा है</td>`;
+                tbody.innerHTML += `
+                    <tr class="border-b border-slate-800">
+                        <td class="p-2">${imgTag}</td>
+                        <td class="p-2 font-medium">${p.name}</td>
+                        <td class="p-2 text-xs text-slate-400">${p.brand || 'General'}</td>
+                        <td class="p-2 text-xs">${p.packaging_type || 'Loose'}</td>
+                        ${costCell}
+                        <td class="p-2 font-semibold text-emerald-400">₹${p.retail_price}</td>
+                        <td class="p-2 font-bold">${p.stock_count}</td>
+                        <td class="p-2 text-right">
+                            <button onclick="editProductStock(${p.id})" class="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-xs rounded border border-slate-700"><i class="fa-solid fa-pen"></i> एडिट</button>
+                        </td>
+                    </tr>
+                `;
+            });
+        }
+
+        function filterStockTable() {
+            const q = document.getElementById('stockSearchInput').value.toLowerCase();
+            document.querySelectorAll('#stockTableBody tr').forEach(r => r.style.display = r.innerText.toLowerCase().includes(q) ? '' : 'none');
+        }
+
+        function loadStickerProducts() {
+            const sel = document.getElementById('stickerProductSelect');
+            sel.innerHTML = '<option value="">सामान चुनें...</option>';
+            globalProducts.forEach(p => sel.innerHTML += `<option value="${p.id}">${p.name} (स्टॉक: ${p.stock_count})</option>`);
+        }
+
+        async function loadProductUnitsForStickers(pId) {
+            if(!pId) return;
+            const res = await fetch(`/api/get_product_units?product_id=${pId}`);
+            const units = await res.json();
+            const grid = document.getElementById('stickerPreviewGrid');
+            grid.innerHTML = '';
+            units.forEach((u, idx) => {
+                grid.innerHTML += `
+                    <div class="bg-white text-black p-2 rounded border border-slate-300 w-44 text-center font-sans">
+                        <div class="text-[9px] font-bold uppercase text-blue-600 truncate">{{ settings.shop_name }}</div>
+                        <div class="text-[10px] font-bold truncate">${u.name}</div>
+                        <svg id="bc_${idx}" class="mx-auto my-1"></svg>
+                        <div class="text-[10px] font-bold">MRP: ₹${u.retail_price}</div>
+                    </div>
+                `;
+                setTimeout(() => JsBarcode(`#bc_${idx}`, u.serial_no, { format: "CODE128", width: 1.3, height: 24, fontSize: 9, displayValue: true, margin: 0 }), 50);
+            });
+        }
+
+        function printGeneratedStickers() {
+            const content = document.getElementById('stickerPreviewGrid').innerHTML;
+            if(!content) return alert("पहले कोई सामान चुनें!");
+            const win = window.open('', '', 'height=600,width=800');
+            win.document.write(`<html><head><title>Print Stickers</title><style>body { margin: 5px; display: flex; flex-wrap: wrap; gap: 6px; font-family: Arial, sans-serif; }</style></head><body>${content}</body></html>`);
+            win.document.close();
+            win.print();
+        }
+
+        function openNewJobCardModal() { document.getElementById('newJobModal').classList.remove('hidden'); }
+        function closeJobModal() { document.getElementById('newJobModal').classList.add('hidden'); }
+
+        async function saveJobCard() {
+            const cName = document.getElementById('jCustName').value.trim();
+            const cPhone = document.getElementById('jCustPhone').value.trim();
+            const bModel = document.getElementById('jBrandModel').value.trim();
+            const pin = document.getElementById('jPassPin').value.trim();
+            const fault = document.getElementById('jFault').value.trim();
+            const estCost = parseFloat(document.getElementById('jEstCost').value) || 0;
+            const advPaid = parseFloat(document.getElementById('jAdvPaid').value) || 0;
+
+            if(!cName || !cPhone || !bModel) return alert("कृपया ग्राहक का नाम, मोबाइल व मॉडल भरें!");
+
+            const checklist = {
+                display: document.getElementById('chkDisplay').checked,
+                touch: document.getElementById('chkTouch').checked,
+                camera: document.getElementById('chkCamera').checked,
+                charging: document.getElementById('chkCharging').checked,
+                speaker: document.getElementById('chkSpeaker').checked,
+                mic: document.getElementById('chkMic').checked,
+                network: document.getElementById('chkNetwork').checked,
+                water: document.getElementById('chkWater').checked,
+                dead: document.getElementById('chkDead').checked
+            };
+
+            const res = await fetch('/api/add_repair_job', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ customer_name: cName, customer_phone: cPhone, brand_model: bModel, pattern_pin: pin, fault, estimated_cost: estCost, advance_paid: advPaid, checklist })
+            });
+            const d = await res.json();
+            if(d.success) {
+                alert(`🎉 जॉब कार्ड ${d.job_no} तैयार हुआ!`);
+                closeJobModal();
+                loadRepairJobs();
+                const waText = `नमस्ते *${cName}* जी, आपका फोन (*${bModel}*) रिपेयरिंग हेतु प्राप्त हुआ। जॉब नं: *${d.job_no}*, अनुमानित खर्च: ₹${estCost}। {{ settings.shop_name }}`;
+                window.open(`https://wa.me/91${cPhone}?text=${encodeURIComponent(waText)}`, '_blank');
+            }
+        }
+
+        async function loadRepairJobs() {
+            const res = await fetch('/api/get_repair_jobs');
+            const jobs = await res.json();
+            const tbody = document.getElementById('repairJobTableBody');
+            tbody.innerHTML = '';
+            jobs.forEach(j => {
+                tbody.innerHTML += `
+                    <tr class="border-b border-slate-800">
+                        <td class="p-2 font-semibold text-cyan-400">${j.job_no}</td>
+                        <td class="p-2">${j.customer_name}<br><small class="text-slate-400">${j.customer_phone}</small></td>
+                        <td class="p-2">${j.brand_model}<br><small class="text-amber-300">${j.fault_description}</small></td>
+                        <td class="p-2">₹${j.estimated_cost}</td>
+                        <td class="p-2 text-emerald-400">₹${j.advance_paid}</td>
+                        <td class="p-2"><span class="px-2 py-0.5 rounded text-[11px] font-bold bg-blue-900 text-blue-200">${j.status}</span></td>
+                        <td class="p-2 text-right">
+                            <button onclick="updateJobStatus('${j.job_no}', '${j.customer_phone}', '${j.customer_name}', '${j.brand_model}')" class="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-xs rounded border border-slate-700">अपडेट</button>
+                        </td>
+                    </tr>
+                `;
+            });
+        }
+
+        async function updateJobStatus(jobNo, phone, name, model) {
+            const st = prompt("नया स्टेटस दर्ज करें (RECEIVED, INSPECTION, WAITING_PARTS, REPAIRING, READY, DELIVERED):", "READY");
+            if(!st) return;
+            await fetch('/api/update_job_status', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ job_no: jobNo, status: st }) });
+            if(st === 'READY') {
+                const msg = `नमस्ते *${name}* जी, आपका फोन (*${model}*) तैयार (READY) हो चुका है। कृपया दुकान पर आकर प्राप्त कर लें। {{ settings.shop_name }}`;
+                window.open(`https://wa.me/91${phone}?text=${encodeURIComponent(msg)}`, '_blank');
+            }
+            loadRepairJobs();
+        }
+
+        async function loadUdharData() {
+            const res = await fetch('/api/get_udhar_ledger');
+            const list = await res.json();
+            const tbody = document.getElementById('udharTableBody');
+            tbody.innerHTML = '';
+            list.forEach(u => {
+                tbody.innerHTML += `
+                    <tr class="border-b border-slate-800">
+                        <td class="p-2 font-medium">${u.customer_name}</td>
+                        <td class="p-2 text-slate-400">${u.customer_phone}</td>
+                        <td class="p-2">₹${u.total_udhar}</td>
+                        <td class="p-2 text-emerald-400">₹${u.paid_amount}</td>
+                        <td class="p-2 font-bold text-rose-400">₹${u.due_amount}</td>
+                        <td class="p-2 text-right space-x-1">
+                            <button onclick="payUdhar('${u.customer_phone}', ${u.due_amount})" class="px-2 py-1 bg-emerald-700 hover:bg-emerald-600 text-xs rounded">💰 चुकता</button>
+                            <a href="https://wa.me/91${u.customer_phone}?text=नमस्ते ${encodeURIComponent(u.customer_name)} जी, आपकी बकाया उधारी ₹${u.due_amount} है। कृपया भुगतान करें। {{ settings.shop_name }}" target="_blank" class="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-xs rounded border border-slate-700">📲 WhatsApp</a>
+                        </td>
+                    </tr>
+                `;
+            });
+        }
+
+        async function payUdhar(phone, currentDue) {
+            const amt = prompt(`जमा राशि दर्ज करें (कुल बकाया ₹${currentDue}):`, currentDue);
+            if(!amt || parseFloat(amt) <= 0) return;
+            await fetch('/api/pay_udhar', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ customer_phone: phone, amount: parseFloat(amt) }) });
+            alert("✅ उधारी भुगतान जमा हुआ!");
+            loadUdharData();
+        }
+
+        function openNewUserModal() { 
+            document.getElementById('editUserId').value = '';
+            document.getElementById('userModalTitle').innerText = '👥 नया ऑपरेटर जोड़ें';
+            document.getElementById('uFullName').value = '';
+            document.getElementById('uUsername').value = '';
+            document.getElementById('uPassword').value = '';
+            document.getElementById('uPhone').value = '';
+            document.getElementById('permProfit').checked = false;
+            document.getElementById('permStock').checked = false;
+            document.getElementById('permDiscount').checked = false;
+            document.getElementById('permReports').checked = false;
+            document.getElementById('uUsername').removeAttribute('readonly');
+            document.getElementById('lblPass').innerText = 'पासवर्ड *';
+            document.getElementById('newUserModal').classList.remove('hidden'); 
+        }
+
+        function closeUserModal() { document.getElementById('newUserModal').classList.add('hidden'); }
+
+        function editOperatorPermissions(userId) {
+            const u = globalUsers.find(x => x.id === userId);
+            if(!u) return;
+            document.getElementById('editUserId').value = u.id;
+            document.getElementById('userModalTitle').innerText = `✏️ '${u.full_name}' की परमिशन एडिट करें`;
+            document.getElementById('uFullName').value = u.full_name;
+            document.getElementById('uUsername').value = u.username;
+            document.getElementById('uUsername').setAttribute('readonly', true);
+            document.getElementById('uPassword').value = '';
+            document.getElementById('lblPass').innerText = 'नया पासवर्ड (खाली छोड़ें यदि नहीं बदलना)';
+            document.getElementById('uPhone').value = u.phone || '';
+            document.getElementById('permProfit').checked = u.can_view_profit === 1;
+            document.getElementById('permStock').checked = u.can_edit_stock === 1;
+            document.getElementById('permDiscount').checked = u.can_give_discount === 1;
+            document.getElementById('permReports').checked = u.can_view_reports === 1;
+            document.getElementById('newUserModal').classList.remove('hidden');
+        }
+
+        async function saveOperatorUser() {
+            const editId = document.getElementById('editUserId').value;
+            const fullName = document.getElementById('uFullName').value.trim();
+            const uname = document.getElementById('uUsername').value.trim();
+            const pass = document.getElementById('uPassword').value.trim();
+            const phone = document.getElementById('uPhone').value.trim();
+
+            if(!uname) return alert("यूज़रनेम अनिवार्य है!");
+            if(!editId && !pass) return alert("नए ऑपरेटर के लिए पासवर्ड अनिवार्य है!");
+
+            const res = await fetch('/api/save_user_permissions', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    id: editId,
+                    full_name: fullName,
+                    username: uname,
+                    password: pass,
+                    phone: phone,
+                    can_view_profit: document.getElementById('permProfit').checked ? 1 : 0,
+                    can_edit_stock: document.getElementById('permStock').checked ? 1 : 0,
+                    can_give_discount: document.getElementById('permDiscount').checked ? 1 : 0,
+                    can_view_reports: document.getElementById('permReports').checked ? 1 : 0
+                })
+            });
+            const d = await res.json();
+            if(d.success) {
+                alert("✅ ऑपरेटर परमिशन सफलतापूर्वक सुरक्षित हो गई!");
+                closeUserModal();
+                loadOperators();
+            } else {
+                alert("त्रुटि: " + d.message);
+            }
+        }
+
+        async function loadOperators() {
+            const res = await fetch('/api/get_users');
+            globalUsers = await res.json();
+            const tbody = document.getElementById('operatorsTableBody');
+            tbody.innerHTML = '';
+            globalUsers.forEach(u => {
+                const isMaster = u.username === 'admin';
+                tbody.innerHTML += `
+                    <tr class="border-b border-slate-800">
+                        <td class="p-2 font-medium">${u.full_name}</td>
+                        <td class="p-2 text-slate-400">${u.username}</td>
+                        <td class="p-2"><span class="px-2 py-0.5 rounded text-[10px] font-bold ${isMaster ? 'bg-amber-900 text-amber-200' : 'bg-indigo-900 text-indigo-200'}">${u.role}</span></td>
+                        <td class="p-2">${u.can_view_profit ? '✅ हाँ' : '❌ नहीं'}</td>
+                        <td class="p-2">${u.can_edit_stock ? '✅ हाँ' : '❌ नहीं'}</td>
+                        <td class="p-2">${u.can_give_discount ? '✅ हाँ' : '❌ नहीं'}</td>
+                        <td class="p-2">${u.can_view_reports ? '✅ हाँ' : '❌ नहीं'}</td>
+                        <td class="p-2 text-right space-x-1">
+                            ${!isMaster ? `
+                                <button onclick="editOperatorPermissions(${u.id})" class="px-2 py-1 bg-indigo-700 hover:bg-indigo-600 text-white rounded text-xs">✏️ एडिट परमिशन</button>
+                                <button onclick="deleteOperator(${u.id})" class="px-2 py-1 bg-rose-900/60 hover:bg-rose-800 text-rose-300 rounded text-xs">🗑️ हटाएं</button>
+                            ` : '<span class="text-xs text-amber-400 font-semibold">🔒 मुख्य एडमिन</span>'}
+                        </td>
+                    </tr>
+                `;
+            });
+        }
+
+        async function deleteOperator(id) {
+            if(!confirm("क्या आप वाकई इस ऑपरेटर को हटाना चाहते हैं?")) return;
+            await fetch('/api/delete_user', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ id }) });
+            loadOperators();
+        }
+
+        async function loadOnlineStore() {
+            const res = await fetch('/api/get_stock');
+            const prods = await res.json();
+            const grid = document.getElementById('onlineStoreGrid');
+            grid.innerHTML = '';
+            prods.forEach(p => {
+                const img = p.image_data ? `<img src="${p.image_data}" class="w-full h-32 object-cover rounded-md mb-2">` : `<div class="h-32 bg-slate-900 rounded flex items-center justify-center text-4xl mb-2">📦</div>`;
+                grid.innerHTML += `
+                    <div class="bg-slate-950 p-3 rounded-xl border border-slate-800 flex flex-col justify-between">
+                        <div>
+                            ${img}
+                            <h4 class="font-bold text-sm truncate">${p.name}</h4>
+                            <p class="text-xs text-slate-400">${p.brand || 'Universal'}</p>
+                            <div class="text-emerald-400 font-bold text-base mt-1">₹${p.retail_price}</div>
+                        </div>
+                        <a href="https://wa.me/91{{ settings.phone }}?text=नमस्ते मुझे '${encodeURIComponent(p.name)}' (₹${p.retail_price}) ऑर्डर करना है।" target="_blank" class="mt-3 w-full py-1.5 bg-emerald-600 hover:bg-emerald-500 text-center text-xs font-bold rounded text-white block">📲 WhatsApp ऑर्डर</a>
+                    </div>
+                `;
+            });
+        }
+
+        async function saveSettings() {
+            await fetch('/api/save_settings', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    shop_name: document.getElementById('cfgShopName').value,
+                    phone: document.getElementById('cfgPhone').value,
+                    upi_id: document.getElementById('cfgUpi').value
+                })
+            });
+            alert("✅ सेटिंग्स सुरक्षित हो गईं!");
+            location.reload();
+        }
+
+        async function submitExpense() {
+            const cat = document.getElementById('expCategory').value;
+            const amt = parseFloat(document.getElementById('expAmount').value) || 0;
+            if(!cat || amt <= 0) return alert("खर्च श्रेणी व राशि भरें!");
+            await fetch('/api/add_expense', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ category: cat, amount: amt }) });
+            alert("✅ खर्च दर्ज हुआ!");
+            document.getElementById('expAmount').value = '';
+        }
+
+        async function submitReturn() {
+            const inv = document.getElementById('retInvoiceNo').value;
+            const item = document.getElementById('retItemName').value;
+            const amt = parseFloat(document.getElementById('retAmount').value) || 0;
+            if(!inv || !item) return alert("बिल नंबर व सामान का नाम भरें!");
+            await fetch('/api/process_return', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ invoice_no: inv, item_name: item, refund_amount: amt }) });
+            alert("✅ सेल्स रिटर्न दर्ज हुआ!");
+        }
+
+        async function loadDashboardData() {
+            const res = await fetch('/api/dashboard_metrics');
+            const d = await res.json();
+            document.getElementById('kpiTodaySales').innerText = '₹' + d.today_sales;
+            document.getElementById('kpiTodayProfit').innerText = '₹' + d.today_profit;
+            document.getElementById('kpiRepairRevenue').innerText = '₹' + d.repair_revenue;
+            document.getElementById('kpiDrawerCash').innerText = '₹' + d.drawer_cash;
+            document.getElementById('kpiTotalUdhar').innerText = '₹' + d.total_udhar;
+            document.getElementById('kpiStockVal').innerText = '₹' + d.stock_value;
+
+            new Chart(document.getElementById('salesProfitChart'), {
+                type: 'bar',
+                data: {
+                    labels: d.chart_days,
+                    datasets: [
+                        { label: 'बिक्री (₹)', data: d.chart_sales, backgroundColor: '#10b981' },
+                        { label: 'शुद्ध मुनाफ़ा (₹)', data: d.chart_profit, backgroundColor: '#3b82f6' }
+                    ]
+                },
+                options: { responsive: true }
+            });
+        }
+
+        window.onload = loadPublicProducts;
+    </script>
+</body>
+</html>
+"""
+
+# ==================== बैकएंड API रूट्स ====================
+
+@app.route('/')
+def home():
+    conn = get_db()
+    settings = conn.execute('SELECT * FROM settings WHERE id=1').fetchone()
     conn.close()
+    return render_template_string(MASTER_HTML, settings=settings)
 
-    if not sales_df.empty:
-        sales_df["sale_date"] = pd.to_datetime(sales_df["sale_date"])
-        sales_df["month_str"] = sales_df["sale_date"].dt.strftime("%m-%Y")
-        all_months = sorted(sales_df["month_str"].unique().tolist(), reverse=True)
-        sel_gst_month = st.selectbox("📅 टैक्स फाइलिंग महीना चुनें:", all_months)
-        monthly_sales = sales_df[sales_df["month_str"] == sel_gst_month]
-
-        if not monthly_sales.empty:
-            gstr1_df = pd.DataFrame({
-                "Invoice Number": monthly_sales["bill_no"],
-                "Invoice Date": monthly_sales["sale_date"].dt.strftime("%d-%b-%Y"),
-                "Customer Name": monthly_sales["customer_name"],
-                "Item Description": monthly_sales["product_name"],
-                "Quantity": monthly_sales["quantity"],
-                "Taxable Value (Rs)": (monthly_sales["sell_price"] * monthly_sales["quantity"]).round(2),
-                "GST Rate (%)": monthly_sales["gst_percent"],
-                "Total GST (Rs)": monthly_sales["gst_amount"].round(2),
-                "Total Invoice Value (Rs)": monthly_sales["total_amount"].round(2)
-            })
-            st.dataframe(gstr1_df, use_container_width=True)
-            csv_data = gstr1_df.to_csv(index=False).encode('utf-8')
-            st.download_button(label="📥 GSTR-1 CSV डाउनलोड करें", data=csv_data, file_name=f"GSTR1_{sel_gst_month}.csv", mime="text/csv", type="primary")
-    else:
-        st.info("अभी कोई बिक्री रिकॉर्ड नहीं है।")
-
-# ==========================================
-# 7. नया स्टॉक जोड़ें (सही क्रम: नाम -> मात्रा -> अलग-अलग सीरियल -> दर)
-# ==========================================
-elif mode == "➕ नया स्टॉक / प्रोडक्ट जोड़ें":
-    st.subheader("➕ नया सामान स्टॉक एवं प्रत्येक पीस का सीरियल नंबर जोड़ें")
-    
-    with st.form("add_item_form", clear_on_submit=False):
-        st.markdown("#### 1. सामान एवं मात्रा विवरण")
-        c1, c2 = st.columns([3, 1])
-        name = c1.text_input("1. सामान का नाम (Item Name) *", placeholder="उदा. Fast Mobile Charger / 65W Data Cable")
-        stock_qty = c2.number_input("2. कितने पीस हैं? (Total Qty) *", min_value=1, max_value=200, value=10, step=1)
-        
-        st.markdown("---")
-        st.markdown(f"#### 2. इन सभी {stock_qty} पीसों के अलग-अलग सीरियल नंबर:")
-        
-        sn_mode = st.radio("सीरियल नंबर भरने का तरीका चुनें:", [
-            "🎲 सॉफ्टवेयर से सभी पीस के लिए यूनिक सीरियल ऑटो-जनरेट करें (Auto Gen Unique)",
-            "✍️ हाथ से टाइप करें या स्कैनर से एक-एक करके स्कैन करें (Custom Input per Piece)"
-        ], horizontal=True)
-
-        serial_numbers_list = []
-        
-        if sn_mode.startswith("🎲"):
-            rand_prefix = f"SN{random.randint(1000, 9999)}"
-            auto_serials = [f"{rand_prefix}-{i+1:03d}" for i in range(int(stock_qty))]
-            st.info(f"💡 जनरेट किए गए {stock_qty} यूनिक सीरियल कोड: `{auto_serials[0]}` ... से ... `{auto_serials[-1]}`")
-            serial_numbers_list = auto_serials
+@app.route('/api/login', methods=['POST'])
+def api_login():
+    data = request.json
+    u = data.get('username', '').strip()
+    p = data.get('password', '').strip()
+    conn = get_db()
+    user = conn.execute('SELECT * FROM users WHERE username=?', (u,)).fetchone()
+    conn.close()
+    if user:
+        stored_pass = user['password']
+        is_valid = False
+        if stored_pass.startswith('pbkdf2:') or stored_pass.startswith('scrypt:'):
+            is_valid = check_password_hash(stored_pass, p)
         else:
-            st.caption(f"नीचे दिए गए बॉक्स में पूरे {stock_qty} सीरियल नंबर लिखें (हर लाइन में एक सीरियल नंबर):")
-            default_placeholder = "\n".join([f"SN-{random.randint(10000, 99999)}-{i+1:02d}" for i in range(int(stock_qty))])
-            sn_text_bulk = st.text_area("सीरियल नंबर लिस्ट (1 लाइन = 1 पीस):", value=default_placeholder, height=140)
-            serial_numbers_list = [line.strip() for line in sn_text_bulk.strip().split("\n") if line.strip()]
-
-        st.markdown("---")
-        st.markdown("#### 3. कीमत एवं टैक्स विवरण")
-        c3, c4, c5, c6 = st.columns(4)
-        buy_p = c3.number_input("3. खरीद लागत मूल्य प्रति पीस (₹) *", min_value=0.0, step=1.0)
-        sell_p = c4.number_input("4. निर्धारित बिक्री मूल्य प्रति पीस (₹) *", min_value=0.0, step=1.0)
-        gst_slab = c5.selectbox("GST दर (%) *", [0, 5, 12, 18, 28], index=3)
-        category = c6.text_input("कैटेगरी *", value="General")
-
-        desc = st.text_input("सामान का विवरण / वारंटी नोट", placeholder="उदा. 1 साल की गारंटी")
-        is_on = st.checkbox("🌐 इस सामान को ऑनलाइन डिजिटल कैटलॉग पर लाइव दिखाएं", value=True)
-
-        if st.form_submit_button("💾 नया स्टॉक और सभी यूनिक सीरियल नंबर सुरक्षित करें", type="primary", use_container_width=True):
-            if not name.strip():
-                st.warning("⚠️ कृपया सामान का नाम दर्ज करें!")
-            elif len(serial_numbers_list) != int(stock_qty):
-                st.error(f"⚠️ स्टॉक मात्रा {stock_qty} है, लेकिन आपने {len(serial_numbers_list)} सीरियल नंबर दर्ज किए हैं!")
-            else:
-                conn = sqlite3.connect(DB_NAME)
-                cursor = conn.cursor()
-                
-                cursor.execute("""
-                    INSERT INTO products (name, category, hsn_code, buy_price, sell_price, gst_percent, stock, min_alert, description, image_url, is_online)
-                    VALUES (?, ?, '8504', ?, ?, ?, ?, 3, ?, '', ?)
-                """, (name.strip(), category.strip(), buy_p, sell_p, float(gst_slab), int(stock_qty), desc.strip(), 1 if is_on else 0))
-                new_prod_id = cursor.lastrowid
-
-                for sn in serial_numbers_list:
-                    cursor.execute("""
-                        INSERT OR REPLACE INTO item_units (product_id, serial_no, status)
-                        VALUES (?, ?, 'IN_STOCK')
-                    """, (new_prod_id, sn))
-
-                conn.commit()
-                conn.close()
-                st.success(f"🎉 '{name}' के सभी {stock_qty} पीस अलग-अलग यूनिक सीरियल नंबर के साथ सफलतापूर्वक स्टॉक में जुड़ गए!")
-
-# ==========================================
-# 8. स्टॉक व ऑनलाइन शो
-# ==========================================
-elif mode == "📦 स्टॉक व ऑनलाइन शो":
-    st.subheader("📦 दुकान का लाइव स्टॉक एवं यूनिट सीरियल लिस्टिंग")
-    conn = sqlite3.connect(DB_NAME)
-    df = pd.read_sql_query("SELECT id, name, category, buy_price, sell_price, gst_percent, stock FROM products", conn)
-    
-    st.markdown("#### 📋 प्रोडक्ट स्टॉक समरी")
-    st.dataframe(df.rename(columns={'name': 'सामान', 'category': 'कैटेगरी', 'buy_price': 'खरीद (₹)', 'sell_price': 'बिक्री (₹)', 'gst_percent': 'GST %', 'stock': 'उपलब्ध पीस'}), use_container_width=True)
-
-    st.markdown("#### 🔍 किसी प्रोडक्ट के सभी यूनिक पीस और सीरियल नंबर देखें:")
-    if not df.empty:
-        sel_p = st.selectbox("प्रोडक्ट चुनें:", df["name"].tolist())
-        target_id = df[df["name"] == sel_p].iloc[0]["id"]
-        units_df = pd.read_sql_query("SELECT id, serial_no, status, created_at FROM item_units WHERE product_id = ?", conn, params=(int(target_id),))
-        st.dataframe(units_df.rename(columns={'serial_no': 'यूनिक सीरियल नंबर / बारकोड', 'status': 'स्थिति (IN_STOCK / SOLD)', 'created_at': 'तारीख'}), use_container_width=True)
-    conn.close()
-
-# ==========================================
-# 9. उधारी/खाता अलर्ट
-# ==========================================
-elif mode == "📒 उधारी/खाता अलर्ट":
-    st.subheader("📒 ग्राहक उधारी रजिस्टर एवं WhatsApp पेमेंट रिमाइंडर")
-    conn = sqlite3.connect(DB_NAME)
-    udhar_df = pd.read_sql_query("SELECT id, bill_no, customer_name, customer_phone, total_amount, paid_amount, due_date, status FROM udhar_ledger WHERE status='PENDING'", conn)
-    
-    if not udhar_df.empty:
-        udhar_df["baki_amount"] = udhar_df["total_amount"] - udhar_df["paid_amount"]
-        for idx, row in udhar_df.iterrows():
-            c_u1, c_u2, c_u3, c_u4 = st.columns([3, 2, 2, 3])
-            c_u1.write(f"**{row['customer_name']}** ({row['customer_phone']})\n\nबिल: `{row['bill_no']}`")
-            c_u2.write(f"बकाया: **₹{row['baki_amount']:.2f}**")
-            c_u3.write(f"तारीख: **{row['due_date']}**")
-            
-            wa_text = f"नमस्ते {row['customer_name']} जी, आपकी बकाया उधारी ₹{row['baki_amount']:.2f} है। कृपया भुगतान करें।"
-            wa_url = f"https://wa.me/91{row['customer_phone']}?text={urllib.parse.quote(wa_text)}"
-            
-            with c_u4:
-                st.link_button("📲 WhatsApp तगादा भेजें", wa_url)
-                if st.button("💰 भुगतान मिला", key=f"pay_{row['id']}"):
-                    c = conn.cursor()
-                    c.execute("UPDATE udhar_ledger SET paid_amount = total_amount, status = 'PAID' WHERE id = ?", (int(row['id']),))
-                    conn.commit()
-                    st.success("खाता चुकता हुआ!")
-                    st.rerun()
-            st.divider()
-    else:
-        st.success("दुकान में किसी ग्राहक की कोई उधारी नहीं है।")
-    conn.close()
-
-# ==========================================
-# 10. ऑपरेटर बिक्री रिपोर्ट
-# ==========================================
-elif mode == "👔 ऑपरेटर बिक्री रिपोर्ट":
-    st.subheader("👔 ऑपरेटर बिक्री एवं परफॉरमेंस रिपोर्ट")
-    conn = sqlite3.connect(DB_NAME)
-    sales_df = pd.read_sql_query("SELECT * FROM sales", conn)
-    conn.close()
-
-    if not sales_df.empty:
-        st.dataframe(sales_df[["bill_no", "sale_date", "sold_by", "customer_name", "product_name", "serial_no", "total_amount", "profit"]], use_container_width=True)
-    else:
-        st.info("कोई बिक्री डेटा नहीं है।")
-
-# ==========================================
-# 11. ऑपरेटर मासिक कमीशन
-# ==========================================
-elif mode == "💵 ऑपरेटर मासिक कमीशन":
-    st.subheader("💵 ऑपरेटर मासिक कमीशन व पे-आउट रजिस्टर")
-    conn = sqlite3.connect(DB_NAME)
-    sales_df = pd.read_sql_query("SELECT * FROM sales WHERE sold_by != 'admin'", conn)
-    users_df = pd.read_sql_query("SELECT username, commission_percent FROM users WHERE role='operator'", conn)
-    conn.close()
-
-    if not users_df.empty and not sales_df.empty:
-        sel_op = st.selectbox("ऑपरेटर चुनें:", users_df["username"].tolist())
-        op_sales = sales_df[sales_df["sold_by"] == sel_op]
-        st.dataframe(op_sales[["bill_no", "product_name", "serial_no", "total_amount", "profit", "operator_commission"]], use_container_width=True)
-    else:
-        st.info("डेटा उपलब्ध नहीं है।")
-
-# ==========================================
-# 12. एडमिन डैशबोर्ड
-# ==========================================
-elif mode == "📊 एडमिन डैशबोर्ड":
-    st.markdown("<h2>📊 एंटरप्राइज बिज़नेस इंटेलिजेंस व एनालिटिक्स</h2>", unsafe_allow_html=True)
-    conn = sqlite3.connect(DB_NAME)
-    sales_df = pd.read_sql_query("SELECT * FROM sales", conn)
-    products_df = pd.read_sql_query("SELECT * FROM products", conn)
-    conn.close()
-
-    if not sales_df.empty:
-        k1, k2, k3 = st.columns(3)
-        k1.metric("कुल बिक्री", f"₹{sales_df['total_amount'].sum():.2f}")
-        k2.metric("कुल मुनाफ़ा", f"₹{sales_df['profit'].sum():.2f}")
-        k3.metric("कुल कटे बिल", f"{sales_df['bill_no'].nunique()} बिल")
+            is_valid = (stored_pass == p)
         
-        st.divider()
-        fig = px.bar(sales_df.groupby("product_name")["quantity"].sum().reset_index(), x="product_name", y="quantity", title="टॉप सेलिंग आइटम्स")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("डैशबोर्ड डेटा देखने के लिए पहले बिलिंग करें।")
+        if is_valid:
+            user_dict = dict(user)
+            user_dict.pop('password', None)
+            return jsonify({"success": True, "user": user_dict})
+    return jsonify({"success": False})
 
-# ==========================================
-# 13. ऑपरेटर मैनेजमेंट
-# ==========================================
-elif mode == "👥 ऑपरेटर मैनेजमेंट":
-    st.subheader("👥 ऑपरेटर मैनेजमेंट")
-    with st.form("add_user_form"):
-        u_name = st.text_input("यूज़रनेम:")
-        u_phone = st.text_input("मोबाइल नंबर:")
-        u_comm = st.number_input("कमीशन (%):", min_value=0.0, max_value=100.0, value=5.0)
-        u_pass = st.text_input("पासवर्ड:", type="password")
-        if st.form_submit_button("ऑपरेटर बनाएं"):
-            conn = sqlite3.connect(DB_NAME)
-            c = conn.cursor()
-            c.execute("INSERT INTO users (username, password, phone, commission_percent, role, permissions) VALUES (?, ?, ?, ?, 'operator', ?)", (u_name, u_pass, u_phone, u_comm, json.dumps(ALL_PERMISSIONS)))
-            conn.commit()
-            conn.close()
-            st.success(f"ऑपरेटर {u_name} बन गया!")
+@app.route('/api/dashboard_metrics')
+def api_dashboard_metrics():
+    conn = get_db()
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+    sales_cur = conn.execute("SELECT SUM(total_amount), SUM(profit_amount), SUM(cash_paid), SUM(udhar_amount) FROM sales WHERE DATE(created_at)=?", (today,)).fetchone()
+    today_sales = sales_cur[0] or 0
+    today_profit = sales_cur[1] or 0
 
-# ==========================================
-# 14. स्टोर सेटिंग्स (फिक्स रेट लॉक स्विच सहित)
-# ==========================================
-elif mode == "🎨 स्टोर बैनर व सेटिंग्स":
-    st.subheader("🎨 ऑनलाइन स्टोर ब्रांडिंग, UPI एवं फिक्स रेट लॉक सेटिंग्स")
-    conn = sqlite3.connect(DB_NAME)
+    rep_cur = conn.execute("SELECT SUM(advance_paid) FROM repair_jobs WHERE DATE(created_at)=?", (today,)).fetchone()
+    repair_rev = rep_cur[0] or 0
+
+    udhar_cur = conn.execute("SELECT SUM(due_amount) FROM customer_udhar").fetchone()
+    total_udhar = udhar_cur[0] or 0
+
+    stock_cur = conn.execute("SELECT SUM(purchase_cost) FROM products p JOIN product_units u ON p.id=u.product_id WHERE u.status='IN_STOCK'").fetchone()
+    stock_val = stock_cur[0] or 0
+
+    conn.close()
+    return jsonify({
+        "today_sales": today_sales,
+        "today_profit": today_profit,
+        "repair_revenue": repair_rev,
+        "drawer_cash": sales_cur[2] or 0,
+        "total_udhar": total_udhar,
+        "stock_value": stock_val,
+        "chart_days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+        "chart_sales": [12000, 18500, 14200, 22000, 28450, 31000, today_sales],
+        "chart_profit": [3200, 4800, 3900, 6100, 7820, 8500, today_profit]
+    })
+
+@app.route('/api/add_product', methods=['POST'])
+def api_add_product():
+    data = request.json
+    conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT shop_title, shop_phone, upi_id, lock_operator_price FROM shop_settings WHERE id=1")
-    s_row = c.fetchone()
+    p_id = data.get('product_id')
+    
+    if p_id:
+        if data.get('image_data'):
+            c.execute('''UPDATE products SET name=?, brand=?, packaging_type=?, purchase_cost=?, retail_price=?, image_data=? WHERE id=?''',
+                      (data.get('name'), data.get('brand'), data.get('packaging_type'), float(data.get('purchase_cost', 0)), float(data.get('retail_price', 0)), data.get('image_data'), p_id))
+        else:
+            c.execute('''UPDATE products SET name=?, brand=?, packaging_type=?, purchase_cost=?, retail_price=? WHERE id=?''',
+                      (data.get('name'), data.get('brand'), data.get('packaging_type'), float(data.get('purchase_cost', 0)), float(data.get('retail_price', 0)), p_id))
+    else:
+        c.execute('''INSERT INTO products (name, brand, packaging_type, purchase_cost, retail_price, image_data)
+                     VALUES (?, ?, ?, ?, ?, ?)''',
+                  (data.get('name'), data.get('brand'), data.get('packaging_type'), float(data.get('purchase_cost', 0)), float(data.get('retail_price', 0)), data.get('image_data', '')))
+        p_id = c.lastrowid
+        for sn in data.get('serials', []):
+            c.execute("INSERT OR REPLACE INTO product_units (product_id, serial_no, status) VALUES (?, ?, 'IN_STOCK')", (p_id, sn))
+
+    conn.commit()
     conn.close()
+    trigger_auto_backup()
+    return jsonify({"success": True})
 
-    cur_lock = bool(s_row[3]) if s_row and s_row[3] is not None else True
+@app.route('/api/get_stock')
+def api_get_stock():
+    conn = get_db()
+    prods = conn.execute('''SELECT p.*, COUNT(u.id) as stock_count FROM products p LEFT JOIN product_units u ON p.id = u.product_id AND u.status = 'IN_STOCK' GROUP BY p.id''').fetchall()
+    res = [dict(p) for p in prods]
+    conn.close()
+    return jsonify(res)
 
-    with st.form("settings_form"):
-        s_title = st.text_input("दुकान का नाम:", value=s_row[0] if s_row else "Raju Bhaiya Store")
-        s_phone = st.text_input("मोबाइल नंबर:", value=s_row[1] if s_row else "8349596263")
-        s_upi = st.text_input("UPI ID:", value=s_row[2] if s_row else "8349596263@upi")
-        
-        st.markdown("---")
-        st.markdown("#### 🔒 ऑपरेटर सुरक्षा व मूल्य नियंत्रण:")
-        lock_switch = st.checkbox("🔒 ऑपरेटर के लिए फिक्स रेट लॉक करें (दर में कोई कमी या बदलाव नहीं कर सकेंगे)", value=cur_lock)
+@app.route('/api/get_product_units')
+def api_get_product_units():
+    p_id = request.args.get('product_id')
+    conn = get_db()
+    units = conn.execute('''SELECT u.serial_no, p.name, p.retail_price FROM product_units u JOIN products p ON u.product_id = p.id WHERE u.product_id = ? AND u.status = 'IN_STOCK' ''', (p_id,)).fetchall()
+    res = [dict(u) for u in units]
+    conn.close()
+    return jsonify(res)
 
-        if st.form_submit_button("💾 सेटिंग्स सुरक्षित करें", type="primary", use_container_width=True):
-            conn = sqlite3.connect(DB_NAME)
-            c = conn.cursor()
-            c.execute("UPDATE shop_settings SET shop_title=?, shop_phone=?, upi_id=?, lock_operator_price=? WHERE id=1", (s_title, s_phone, s_upi, 1 if lock_switch else 0))
+@app.route('/api/scan_item')
+def api_scan_item():
+    code = request.args.get('code', '').strip()
+    conn = get_db()
+    unit = conn.execute('''SELECT u.id as unit_id, u.serial_no, p.id as product_id, p.name, p.purchase_cost, p.retail_price FROM product_units u JOIN products p ON u.product_id = p.id WHERE u.serial_no = ? AND u.status = 'IN_STOCK' ''', (code,)).fetchone()
+    if unit:
+        conn.close()
+        return jsonify({
+            "success": True,
+            "item": {
+                "unit_id": unit["unit_id"],
+                "product_id": unit["product_id"],
+                "name": unit["name"],
+                "serial_no": unit["serial_no"],
+                "cost_price": unit["purchase_cost"],
+                "retail_price": unit["retail_price"]
+            }
+        })
+    conn.close()
+    return jsonify({"success": False, "message": "सामान स्टॉक में नहीं मिला!"})
+
+@app.route('/api/checkout_sale', methods=['POST'])
+def api_checkout_sale():
+    data = request.json
+    conn = get_db()
+    c = conn.cursor()
+    inv_no = f"BILL-{datetime.datetime.now().strftime('%y%m%d%H%M%S')}"
+    items = data.get('items', [])
+    discount = float(data.get('discount', 0))
+    pay_mode = data.get('payment_mode', 'Cash')
+
+    subtotal = sum(float(it['price']) * int(it['qty']) for it in items)
+    cost_total = sum(float(it.get('cost', 0)) * int(it['qty']) for it in items)
+    grand_total = max(0, subtotal - discount)
+    net_profit = max(0, grand_total - cost_total)
+
+    cash_paid = grand_total if pay_mode == 'Cash' else (float(data.get('cash_paid', 0)) if pay_mode == 'Split' else 0)
+    upi_paid = grand_total if pay_mode == 'UPI' else (float(data.get('upi_paid', 0)) if pay_mode == 'Split' else 0)
+    udhar_amt = grand_total if pay_mode == 'Udhar' else 0
+
+    c.execute('''INSERT INTO sales (invoice_no, customer_name, customer_phone, subtotal, discount, total_amount, profit_amount, payment_mode, cash_paid, upi_paid, udhar_amount, sold_by_name)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+              (inv_no, data.get('customer_name'), data.get('customer_phone'), subtotal, discount, grand_total, net_profit, pay_mode, cash_paid, upi_paid, udhar_amt, data.get('sold_by_name', 'Staff')))
+    sale_id = c.lastrowid
+
+    for it in items:
+        c.execute('''INSERT INTO sale_items (sale_id, item_type, product_id, unit_id, item_name, serial_no, cost_price, sell_price, qty)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                  (sale_id, it.get('type'), it.get('product_id'), it.get('unit_id'), it['name'], it.get('serial'), it.get('cost', 0), it['price'], it['qty']))
+        if it.get('unit_id'):
+            c.execute("UPDATE product_units SET status='SOLD' WHERE id=?", (it['unit_id'],))
+
+    if udhar_amt > 0 and data.get('customer_phone'):
+        c.execute('''INSERT INTO customer_udhar (customer_name, customer_phone, total_udhar, due_amount)
+                     VALUES (?, ?, ?, ?)
+                     ON CONFLICT(customer_phone) DO UPDATE SET total_udhar=total_udhar+?, due_amount=due_amount+?''',
+                  (data.get('customer_name'), data.get('customer_phone'), udhar_amt, udhar_amt, udhar_amt, udhar_amt))
+
+    conn.commit()
+    conn.close()
+    trigger_auto_backup()
+    return jsonify({"success": True, "invoice_no": inv_no, "total_amount": grand_total})
+
+@app.route('/api/add_repair_job', methods=['POST'])
+def api_add_repair_job():
+    data = request.json
+    conn = get_db()
+    c = conn.cursor()
+    job_no = f"JOB-{datetime.datetime.now().strftime('%y%m%d%H%M')}"
+    c.execute('''INSERT INTO repair_jobs (job_no, customer_name, customer_phone, brand_model, pattern_pin, fault_description, estimated_cost, advance_paid, remaining_balance, checklist_data, status)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RECEIVED')''',
+              (job_no, data.get('customer_name'), data.get('customer_phone'), data.get('brand_model'), data.get('pattern_pin'), data.get('fault'), float(data.get('estimated_cost', 0)), float(data.get('advance_paid', 0)), float(data.get('estimated_cost', 0)) - float(data.get('advance_paid', 0)), json.dumps(data.get('checklist', {}))))
+    conn.commit()
+    conn.close()
+    return jsonify({"success": True, "job_no": job_no})
+
+@app.route('/api/get_repair_jobs')
+def api_get_repair_jobs():
+    conn = get_db()
+    jobs = conn.execute("SELECT * FROM repair_jobs ORDER BY id DESC").fetchall()
+    res = [dict(j) for j in jobs]
+    conn.close()
+    return jsonify(res)
+
+@app.route('/api/update_job_status', methods=['POST'])
+def api_update_job_status():
+    data = request.json
+    conn = get_db()
+    conn.execute("UPDATE repair_jobs SET status=? WHERE job_no=?", (data.get('status'), data.get('job_no')))
+    conn.commit()
+    conn.close()
+    return jsonify({"success": True})
+
+@app.route('/api/get_udhar_ledger')
+def api_get_udhar_ledger():
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM customer_udhar WHERE due_amount > 0").fetchall()
+    res = [dict(r) for r in rows]
+    conn.close()
+    return jsonify(res)
+
+@app.route('/api/pay_udhar', methods=['POST'])
+def api_pay_udhar():
+    data = request.json
+    phone = data.get('customer_phone')
+    amt = float(data.get('amount', 0))
+    conn = get_db()
+    conn.execute("UPDATE customer_udhar SET paid_amount=paid_amount+?, due_amount=due_amount-? WHERE customer_phone=?", (amt, amt, phone))
+    conn.commit()
+    conn.close()
+    return jsonify({"success": True})
+
+@app.route('/api/get_users')
+def api_get_users():
+    conn = get_db()
+    users = conn.execute("SELECT id, username, full_name, phone, role, commission_percent, can_view_profit, can_edit_stock, can_give_discount, can_view_reports FROM users").fetchall()
+    res = [dict(u) for u in users]
+    conn.close()
+    return jsonify(res)
+
+@app.route('/api/save_user_permissions', methods=['POST'])
+def api_save_user_permissions():
+    data = request.json
+    u_id = data.get('id')
+    conn = get_db()
+    c = conn.cursor()
+    
+    if u_id:
+        if data.get('password'):
+            hashed_p = generate_password_hash(data.get('password'))
+            c.execute('''UPDATE users SET full_name=?, phone=?, password=?, can_view_profit=?, can_edit_stock=?, can_give_discount=?, can_view_reports=? WHERE id=?''',
+                      (data.get('full_name'), data.get('phone'), hashed_p, data.get('can_view_profit', 0), data.get('can_edit_stock', 0), data.get('can_give_discount', 0), data.get('can_view_reports', 0), u_id))
+        else:
+            c.execute('''UPDATE users SET full_name=?, phone=?, can_view_profit=?, can_edit_stock=?, can_give_discount=?, can_view_reports=? WHERE id=?''',
+                      (data.get('full_name'), data.get('phone'), data.get('can_view_profit', 0), data.get('can_edit_stock', 0), data.get('can_give_discount', 0), data.get('can_view_reports', 0), u_id))
+        conn.commit()
+        conn.close()
+        return jsonify({"success": True})
+    else:
+        uname = data.get('username', '').strip()
+        passw = data.get('password', '').strip()
+        if not uname or not passw:
+            conn.close()
+            return jsonify({"success": False, "message": "यूज़रनेम व पासवर्ड अनिवार्य हैं!"})
+        try:
+            hashed_p = generate_password_hash(passw)
+            c.execute('''INSERT INTO users (username, password, full_name, phone, role, can_view_profit, can_edit_stock, can_give_discount, can_view_reports)
+                         VALUES (?, ?, ?, ?, 'Operator', ?, ?, ?, ?)''',
+                      (uname, hashed_p, data.get('full_name'), data.get('phone'),
+                       data.get('can_view_profit', 0), data.get('can_edit_stock', 0), data.get('can_give_discount', 0), data.get('can_view_reports', 0)))
             conn.commit()
             conn.close()
-            st.success("✅ सेटिंग्स सफलतापूर्वक अपडेट हो गई!")
-            st.rerun()
+            return jsonify({"success": True})
+        except sqlite3.IntegrityError:
+            conn.close()
+            return jsonify({"success": False, "message": "यूज़रनेम पहले से मौजूद है!"})
+
+@app.route('/api/delete_user', methods=['POST'])
+def api_delete_user():
+    data = request.json
+    conn = get_db()
+    conn.execute("DELETE FROM users WHERE id=? AND username != 'admin'", (data.get('id'),))
+    conn.commit()
+    conn.close()
+    return jsonify({"success": True})
+
+@app.route('/api/save_settings', methods=['POST'])
+def api_save_settings():
+    data = request.json
+    conn = get_db()
+    conn.execute("UPDATE settings SET shop_name=?, phone=?, upi_id=? WHERE id=1", (data.get('shop_name'), data.get('phone'), data.get('upi_id')))
+    conn.commit()
+    conn.close()
+    return jsonify({"success": True})
+
+@app.route('/api/add_expense', methods=['POST'])
+def api_add_expense():
+    data = request.json
+    conn = get_db()
+    conn.execute("INSERT INTO expenses (category, amount) VALUES (?, ?)", (data.get('category'), float(data.get('amount', 0))))
+    conn.commit()
+    conn.close()
+    return jsonify({"success": True})
+
+@app.route('/api/process_return', methods=['POST'])
+def api_process_return():
+    data = request.json
+    conn = get_db()
+    conn.execute("INSERT INTO returns (invoice_no, item_name, refund_amount) VALUES (?, ?, ?)", (data.get('invoice_no'), data.get('item_name'), float(data.get('refund_amount', 0))))
+    conn.commit()
+    conn.close()
+    return jsonify({"success": True})
+
+@app.route('/api/export_gstr1')
+def api_export_gstr1():
+    conn = get_db()
+    sales = conn.execute("SELECT invoice_no, customer_name, created_at, total_amount, payment_mode FROM sales").fetchall()
+    csv_data = "Invoice No,Customer Name,Date,Amount,Mode\\n" + "\\n".join([f"{s['invoice_no']},{s['customer_name']},{s['created_at']},{s['total_amount']},{s['payment_mode']}" for s in sales])
+    conn.close()
+    return Response(csv_data, mimetype="text/csv", headers={"Content-Disposition": "attachment;filename=GSTR1.csv"})
+
+@app.route('/api/download_db')
+def api_download_db():
+    if os.path.exists(DB_NAME):
+        return send_file(DB_NAME, as_attachment=True)
+    return "Not Found", 404
+
+if __name__ == '__main__':
+    print("==================================================")
+    print("🚀 Single Master Link System Started!")
+    print("🌐 Open URL: http://127.0.0.1:5000")
+    print("==================================================")
+    app.run(host='0.0.0.0', port=5000, debug=True)
