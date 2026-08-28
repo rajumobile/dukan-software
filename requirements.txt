@@ -1,4 +1,7 @@
-streamlit
+Flask==3.0.0
+werkzeug==3.0.1
+gunicorn==21.2.0
 pandas
 plotly
 openpyxl
+streamlit
